@@ -1,0 +1,28 @@
+CloXray is licensed under the GNU General Public License v3.0 (GPL-3.0) —
+the same license as BetterPenetration.
+
+This placeholder will be replaced with the full, verbatim GPL-3.0 text at
+repository-creation time. Two easy ways to populate it:
+
+  • On GitHub: "Add file" -> "Create new file" -> name it `LICENSE` ->
+    "Choose a license template" -> "GNU General Public License v3.0".
+  • Or copy the official text verbatim from:
+    https://www.gnu.org/licenses/gpl-3.0.txt
+
+Per-file notice (optional, for source headers):
+
+    CloXray - x-ray womb mod for Koikatsu CharaStudio
+    Copyright (C) 2026  <your name/handle>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.

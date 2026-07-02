@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net46</TargetFramework>
+    <AssemblyName>LiquidWobbleMPB</AssemblyName>
+    <Description>MaterialPropertyBlock-based wobble script for RSkoi/LiquidShader (any material slot)</Description>
+    <Version>1.0.0</Version>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <RepositoryUrl></RepositoryUrl>
+    <!-- Koikatsu Sunshine install folder. Override for your machine:
+         dotnet build -p:KKSDir="D:\Games\Koikatsu Sunshine"
+         or set it in a local Directory.Build.props (not committed). -->
+    <KKSDir Condition="'$(KKSDir)' == ''">C:\Games\Koikatsu Sunshine</KKSDir>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+    <DefineConstants>$(DefineConstants);KKS</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <DefineConstants>$(DefineConstants);KKS</DefineConstants>
+  </PropertyGroup>
+
+    <ItemGroup>
+    <PackageReference Include="BepInEx.Analyzers" Version="1.*" PrivateAssets="all" />
+    <PackageReference Include="BepInEx.Core" Version="5.*" />
+    <PackageReference Include="UnityEngine.Modules" Version="2019.4.9" IncludeAssets="compile" />
+  </ItemGroup>
+  
+  <ItemGroup Condition="'$(TargetFramework.TrimEnd(`0123456789`))' == 'net'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="KKSAPI">
+      <HintPath>$(KKSDir)\BepInEx\plugins\KKSAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ExtensibleSaveFormat">
+      <HintPath>$(KKSDir)\BepInEx\plugins\KKS_BepisPlugins\KKS_ExtensibleSaveFormat.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(KKSDir)\CharaStudio_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Import Project="..\LiquidShaderWobble.Shared\LiquidShaderWobble.Shared.projitems" Label="Shared" />
+</Project>

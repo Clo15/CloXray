@@ -1,0 +1,38 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.8.34525.116
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "LiquidShaderWobble.KK", "LiquidShaderWobble.KK\LiquidShaderWobble.KK.csproj", "{0AB792D8-7358-4B44-8B8F-DA4F4ACA470D}"
+EndProject
+Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "LiquidShaderWobble.Shared", "LiquidShaderWobble.Shared\LiquidShaderWobble.Shared.shproj", "{1676001F-905F-4CF0-AAC8-AF845E8BE1DF}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "LiquidShaderWobble.KKS", "LiquidShaderWobble.KKS\LiquidShaderWobble.KKS.csproj", "{0253418E-5CA5-4CE7-94B5-29722496DD16}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{0AB792D8-7358-4B44-8B8F-DA4F4ACA470D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0AB792D8-7358-4B44-8B8F-DA4F4ACA470D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0AB792D8-7358-4B44-8B8F-DA4F4ACA470D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0AB792D8-7358-4B44-8B8F-DA4F4ACA470D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0253418E-5CA5-4CE7-94B5-29722496DD16}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0253418E-5CA5-4CE7-94B5-29722496DD16}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0253418E-5CA5-4CE7-94B5-29722496DD16}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0253418E-5CA5-4CE7-94B5-29722496DD16}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {5036E540-D2D1-4AC1-9FB1-D27B4ED549BF}
+	EndGlobalSection
+	GlobalSection(SharedMSBuildProjectFiles) = preSolution
+		LiquidShaderWobble.Shared\LiquidShaderWobble.Shared.projitems*{0253418e-5ca5-4ce7-94b5-29722496dd16}*SharedItemsImports = 5
+		LiquidShaderWobble.Shared\LiquidShaderWobble.Shared.projitems*{0ab792d8-7358-4b44-8b8f-da4f4aca470d}*SharedItemsImports = 5
+		LiquidShaderWobble.Shared\LiquidShaderWobble.Shared.projitems*{1676001f-905f-4cf0-aac8-af845e8be1df}*SharedItemsImports = 13
+	EndGlobalSection
+EndGlobal

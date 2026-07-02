@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <MSBuildAllProjects Condition="'$(MSBuildVersion)' == '' Or '$(MSBuildVersion)' &lt; '16.0'">$(MSBuildAllProjects);$(MSBuildThisFileFullPath)</MSBuildAllProjects>
+    <HasSharedItems>true</HasSharedItems>
+    <SharedGUID>1676001f-905f-4cf0-aac8-af845e8be1df</SharedGUID>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration">
+    <Import_RootNamespace>LiquidShaderWobble.Shared</Import_RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)LiquidShaderWobblePlugin.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Scripts\LiquidShaderWobbleEffect.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Scripts\WombExpandEffect.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Scripts\BPBridge.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Scripts\AutoBodyReveal.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Scripts\WobbleSceneController.cs" />
+  </ItemGroup>
+</Project>

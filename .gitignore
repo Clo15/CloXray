@@ -1,0 +1,50 @@
+# ---- Build artifacts (distributed via GitHub Releases, not committed) ----
+*.zipmod
+LiquidWobbleMPB.dll
+
+# ---- Game / third-party binaries (NOT redistributed; supply from your own install) ----
+*.unity3d
+*.dll
+*.dmp
+
+# ---- Unity (shaders/) generated ----
+shaders/[Ll]ibrary/
+shaders/[Tt]emp/
+shaders/[Oo]bj/
+shaders/[Ll]ogs/
+shaders/[Uu]serSettings/
+shaders/Output/
+shaders/*.csproj
+shaders/*.sln
+shaders/.vs/
+
+# ---- .NET (plugin/) generated ----
+plugin/**/bin/
+plugin/**/obj/
+plugin/.vs/
+
+# ---- Python (build/) generated ----
+__pycache__/
+*.pyc
+*_unpack/
+
+# ---- Local development only — never published ----
+Directory.Build.props
+snapshots/
+backups/
+HANDOVER.md
+DESIGN_NOTES*.md
+*_inspect*.py
+_*.py
+
+# decompiled third-party reference (local only)
+**/_*decomp/
+
+# xukmi's KKShadersPlus base (MIT) - not redistributed; builders supply per shaders/Assets/Shaders/Includes/README.md
+shaders/**/Includes/KKP*.cginc
+shaders/**/Includes/KKP*.cginc.meta
+shaders/**/Textures/matcap.png
+shaders/**/Textures/matcap.png.meta
+
+# womb build pipeline + edit history -> kept local (final mesh ships as a prebuilt binary)
+/build/
