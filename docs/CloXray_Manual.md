@@ -80,6 +80,8 @@ On a bottle / other item: apply the `CloXray/Liquid` shader to a liquid mesh cop
 ---
 
 ## Requirements
+Koikatsu (KK) is the primary version; the Koikatsu Sunshine (KKS) build is still in testing.
+
 Just the latest HF patch, or:
 **Required:** BepInEx + Sideloader (KK), KKAPI, MaterialEditor.
 **Optional (per feature):**

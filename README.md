@@ -4,8 +4,8 @@ An x-ray womb mod for Koikatsu CharaStudio: a see-through body revealing a trans
 ovaries and tubes, with a fillable liquid inside the womb (gravity, wobble, slosh) and a vaginal
 canal that opens and reacts to penetration in real time.
 
-Built primarily for Koikatsu (KK). It also runs on Koikatsu Sunshine (KKS) — the zipmods are
-shared; KKS uses its own plugin build.
+Koikatsu (KK) is the primary version. The Koikatsu Sunshine (KKS) build is still in testing —
+the zipmods are shared; KKS uses its own plugin build. Report KKS issues if you hit any.
 
 The finished build is on the [Releases](../../releases) page. This repository holds the plugin
 and shader source; the womb studio item ships prebuilt (see below).
@@ -24,9 +24,10 @@ maintained outside this repository.
 
 ## Install (for users)
 
-Grab the latest [Release](../../releases) and copy:
-- `[Clo]XrayShaders.zipmod` and `[Clo]XrayWomb1.zipmod` → your game's `mods/` folder (these work on both KK and KKS)
-- `LiquidWobbleMPB.dll` → `BepInEx/plugins/` — use the **KK** build for Koikatsu, or the **KKS** build for Koikatsu Sunshine
+Grab the zip for your game from the latest [Release](../../releases) — `KK_CloXray.zip` for
+Koikatsu (primary), `KKS_CloXray.zip` for Koikatsu Sunshine (in testing) — and extract it into
+the game folder. It carries the two zipmods (`mods/Clo/`), the plugin (`BepInEx/plugins/Clo/`),
+the manual, and an example scene (KK zip).
 
 See [docs/CloXray_Manual.md](docs/CloXray_Manual.md) for usage. The womb requires the plugin
 (the liquid is hidden without it, by design).
