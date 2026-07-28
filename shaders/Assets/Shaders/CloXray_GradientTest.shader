@@ -1,32 +1,9 @@
 // CloXray/GradientTest
-// Solid-color shell shader with three independent alpha modulators that all
-// multiply together:
-//   1. _Tint.a              — base transparency
-//   2. View-angle gradient  — pow(|dot(N, V)|, _Power), optionally inverted
-//                             (off when _Power = 0)
-//   3. Vertex color alpha   — multiplies by vertex.color.a, optionally
-//                             inverted (1 - vColor.a) for meshes whose
-//                             paint convention is opposite of what you need
-//
-// Recipes:
-//   A. Bigger-mesh silhouette fresnel:
-//      _Power = 2.5, _Invert = 1, _Cull = 1 (Front), _UseVertexAlpha = 0
-//      → bright at mesh silhouette, fades to transparent at the middle.
-//
-//   B. Solidify+vertex-paint, organ-visible-at-center:
-//      _Power = 0, _UseVertexAlpha = 1, _InvertVertexAlpha = 0, _Cull = 0
-//      → with a mesh painted (inner=alpha 1, outer=alpha 0): inner = opaque,
-//        outer = transparent. (Original WombShell convention.)
-//
-//   C. Body-fade — organ visible near surface, fades to BODY COLOR outward:
-//      _Tint = body skin color (alpha 1), _Power = 0,
-//      _UseVertexAlpha = 1, _InvertVertexAlpha = 1, _Cull = 2 (Back)
-//      → with the same WombShell mesh (inner=alpha 1, outer=alpha 0): inner
-//        becomes transparent (organ shows through), outer becomes opaque
-//        body color so the shell blends smoothly into the surrounding body.
-//
-// Always-on-top (ZTest Always) so it's visible regardless of body depth.
-// No stencil interaction.
+// 1. _Tint.a - base transparency
+// 2. View-angle gradient - pow(|dot(N, V)|, _Power), optionally inverted
+// (off when _Power = 0)
+// 3. Vertex color alpha - multiplies by vertex.color.a, optionally
+// inverted (1 - vColor.a) for meshes whose
 Shader "CloXray/GradientTest"
 {
     Properties
@@ -38,7 +15,6 @@ Shader "CloXray/GradientTest"
         [Toggle] _UseVertexAlpha ("Use Vertex Color Alpha", Float) = 0
         // Flip the vertex-color alpha: if your shell has inner=alpha 1 and
         // outer=alpha 0, turn this ON to swap the gradient direction (use
-        // when you want OUTER opaque + INNER transparent, e.g. body-fade).
         [Toggle] _InvertVertexAlpha ("Invert Vertex Alpha (1 - vColor.a)", Float) = 0
     }
     SubShader

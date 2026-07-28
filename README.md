@@ -1,11 +1,30 @@
 # CloXray
 
-An x-ray womb mod for Koikatsu CharaStudio: a see-through body revealing a transparent uterus,
-ovaries and tubes, with a fillable liquid inside the womb (gravity, wobble, slosh) and a vaginal
-canal that opens and reacts to penetration in real time.
+An x-ray womb mod for Koikatsu and Koikatsu Sunshine: a see-through body revealing a transparent
+uterus, ovaries and tubes, with a fillable liquid inside the womb (gravity, wobble, slosh) and a
+vaginal canal that opens and reacts to penetration in real time. Works in CharaStudio scenes and,
+as of 1.1, in the main game's H scenes (Free-H).
 
-Koikatsu (KK) is the primary version. The Koikatsu Sunshine (KKS) build is still in testing —
-the zipmods are shared; KKS uses its own plugin build. Report KKS issues if you hit any.
+## Free-H support (new in 1.1)
+
+Toggle the womb on the H partner with **Shift+Alt+W** (rebindable in the F1 menu, *Free-H → Toggle
+womb hotkey* — Studio keeps its own Shift+Alt+X) and the x-ray,
+canal reaction and liquid all work during normal H play. The mod does not change the H animations themselves - it adapts to them:
+it measures each animation and sizes the penis to fit the pair you are playing, so penetration
+lines up even on odd-sized characters (very small or very large girls and males included). The
+sizing tables for common animations ship with the mod; anything unknown is learned after a
+single stroke and remembered.
+
+Version 1.1 adds the Free-H support above (per-animation penis sizing from shipped measurement
+tables with live learning, separate weak/strong loop fits, per-male canal width, mid-penetration
+womb spawning), a womb that can be placed anywhere on the character rather than only in the vagina
+(vaginal, anal, or reacting on its own wherever you put it), and a large Studio performance pass.
+See `plugin/CHANGELOG.md`.
+
+Note on BetterPenetration: the plugin ships two small BP work-arounds (a duplicate-constraint
+guard and a penis-FK fix on scene load). Both are already fixed upstream in BetterPenetration
+itself and will reach the HF Patch in a future update; once they do, the work-arounds will be
+removed in a later CloXray version. Running the fixed BP alongside them causes no conflict.
 
 The finished build is on the [Releases](../../releases) page. This repository holds the plugin
 and shader source; the womb studio item ships prebuilt (see below).
@@ -25,7 +44,7 @@ maintained outside this repository.
 ## Install (for users)
 
 Grab the zip for your game from the latest [Release](../../releases) — `KK_CloXray.zip` for
-Koikatsu (primary), `KKS_CloXray.zip` for Koikatsu Sunshine (in testing) — and extract it into
+Koikatsu, `KKS_CloXray.zip` for Koikatsu Sunshine — and extract it into
 the game folder. It carries the two zipmods (`mods/Clo/`), the plugin (`BepInEx/plugins/Clo/`),
 the manual, and an example scene (KK zip).
 

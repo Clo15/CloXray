@@ -1,24 +1,9 @@
-// CloXray/BodyRevealExtra — overlay-style x-ray cutout
-//
+// CloXray/BodyRevealExtra - overlay-style x-ray cutout
 // Apply to a duplicate body material on body slot 2 (alongside CloXray/BodyReveal
 // on body slot 1). Renders body texture × _Color with KK hair-style lighting ON
-// TOP of the alpha-blended organ at organ-silhouette pixels only.
-//
-// Architecture (uses existing CloXray/Organ's stencil chain — no OrganMark needed):
-//   Q2500 — CloXray/BodyReveal stamps stencil 43 at body pixels
-//   Q3500 — CloXray/Organ alpha-blends organ over body, increments stencil to 44
-//   Q3504 — THIS SHADER:
-//       At stencil = _StencilBody_Plus_1 (44 for pair A, 46 for pair B) pixels,
-//       renders body texture with KK lighting alpha-blended at (1 - _XrayAlpha).
-//       Outside organ region: doesn't fire.
-//
-// _XrayAlpha semantic (user-facing "x-ray strength"):
-//   0 = body fully opaque (suit covers organ → NO x-ray)
-//   1 = body invisible (organ from Q3500 visible → FULL x-ray)
-//
-// No depth manipulation, no Offset. Clothes / outline / etc. unaffected.
-// Body slot 0 renders normally everywhere — lighting mismatch is confined to
-// the organ-silhouette pixels only.
+// Architecture (uses existing CloXray/Organ's stencil chain - no OrganMark needed):
+// Q2500 - CloXray/BodyReveal stamps stencil 43 at body pixels
+// Q3500 - CloXray/Organ alpha-blends organ over body, increments stencil to 44
 Shader "CloXray/BodyRevealExtra"
 {
     Properties
@@ -28,8 +13,8 @@ Shader "CloXray/BodyRevealExtra"
         [IntRange] _StencilBody_Plus_1 ("Stencil: Organ Ref (= Body + 1)", Range(2, 18)) = 5
 
         // Whether to include OrgInside pixels in the cutout effect.
-        //   4 (LEqual): cutout covers Organ + OrgInside pixels (default)
-        //   3 (Equal):  cutout covers Organ pixels only
+        // 4 (LEqual): cutout covers Organ + OrgInside pixels (default)
+        // 3 (Equal): cutout covers Organ pixels only
         [Enum(OrganOnly, 3, OrganAndOrgInside, 4)] _StencilComp ("Cutout: include OrgInside?", Float) = 4
 
         _AnotherRamp ("Another Ramp(ViewDir)", 2D) = "white" {}
@@ -82,17 +67,14 @@ Shader "CloXray/BodyRevealExtra"
     SubShader
     {
         LOD 600
-        // Queue 3504 = after the WHOLE womb stack — Organ (3500), OrgInside (3502),
-        // Liquid/cum (3503) — so _XrayAlpha is a true master fade of the in-body
-        // x-ray window (shell + interior + cum). At 3502 (the old value) it tied
-        // with the interior (sorting luck) and always lost to the cum.
+        // Queue 3504 = after the whole womb stack - Organ (3500), OrgInside (3502),
+        // Liquid/cum (3503) - so _XrayAlpha is a true master fade of the in-body
         Tags { "Queue" = "Transparent+504" "RenderType" = "Transparent" }
 
         // ----------------------------------------------------------------
-        // Pass 0: Forward — KK hair-style lighting at organ silhouette
+        // Pass 0: Forward - KK hair-style lighting at organ silhouette
         // pixels (stencil = _StencilBody_Plus_1, set by CloXray/Organ).
         // Output alpha = textureAlpha × (1 - _XrayAlpha).
-        // ----------------------------------------------------------------
         Pass
         {
             Name "Forward"
@@ -334,16 +316,15 @@ Shader "CloXray/BodyRevealExtra"
                 float4 emission = GetEmission(i.uv0);
                 finalDiffuse = finalDiffuse * (1 - emission.a) + (emission.a * emission.rgb);
 
-                // _XrayAlpha = 0 → suit fully opaque (organ hidden behind body)
-                // _XrayAlpha = 1 → suit invisible (organ from Q3500 revealed)
+                // _XrayAlpha = 0 -> suit fully opaque (organ hidden behind body)
+                // _XrayAlpha = 1 -> suit invisible (organ from Q3500 revealed)
                 return float4(finalDiffuse, alpha * (1 - _XrayAlpha));
             }
             ENDCG
         }
 
         // ----------------------------------------------------------------
-        // Pass 1: ShadowCaster — invisible.
-        // ----------------------------------------------------------------
+        // Pass 1: ShadowCaster - invisible.
         Pass
         {
             Name "ShadowCaster"

@@ -4,7 +4,7 @@
     <TargetFramework>net35</TargetFramework>
     <AssemblyName>LiquidWobbleMPB</AssemblyName>
     <Description>MaterialPropertyBlock-based wobble script for RSkoi/LiquidShader (any material slot)</Description>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
     <RepositoryUrl></RepositoryUrl>

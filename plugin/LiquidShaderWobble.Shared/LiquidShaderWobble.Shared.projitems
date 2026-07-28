@@ -15,5 +15,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Scripts\BPBridge.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Scripts\AutoBodyReveal.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Scripts\WobbleSceneController.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Scripts\ShaderCarryOver.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Scripts\MainGameWomb.cs" />
   </ItemGroup>
 </Project>

@@ -1,25 +1,9 @@
-// CloXray/Organ — v3 (with Outline pass)
+// CloXray/Organ - v3 (with Outline pass)
 // v3: removed outline pulse animation + view-facing gradient fade (and their
-//     sliders: _XrayOutlinePulseSpeed/Amount, _XrayOutlineGradientPower) and the
-//     _XrayOutlineDedup toggle (dedup is now always on → clean solid outline).
-// Apply to an organ mesh that sits inside the body.
-//
-// Rendering pipeline (in pass order):
-//   Pass 0  StencilWrite : stamps stencil=[_StencilBody_Plus_1] only where body stencil
-//              [_StencilBody] is present. Cull Back, ZTest Always, ZWrite Off.
-//   Pass 1  Forward      : full KK lighting. ZTest Always renders the organ through
-//              the body regardless of depth — correct for x-ray. Stencil Equal gating
-//              ensures only body-interior pixels are shaded.
-//              Cull [_CullOption] is user-controlled (default Back).
-//   Pass 2  ShadowCaster : invisible — organs don't cast scene shadows.
-//
-// Stencil pairing:
-//   _StencilBody  = Ref used by the matching CloXray/BodyReveal material (default 4)
-//   _StencilBody_Plus_1 = _StencilBody + 1  (default 5) — set both in Material Editor
-//   Pairs (body/organ/cavity): 4/5/6, 8/9/10, 12/13/14, 16/17/18 — fit in bits 0-4.
-//   Bases are EVEN so organ is the only ODD value (the OrgInside outline-mark
-//   relies on that parity). Low masks are 31 (159 in the outline) → bit 5 free.
-//
+// Pass 0 StencilWrite : stamps stencil=[_StencilBody_Plus_1] only where body stencil
+// [_StencilBody] is present. Cull Back, ZTest Always, ZWrite Off.
+// Pass 1 Forward : full KK lighting. ZTest Always renders the organ through
+// the body regardless of depth - correct for x-ray. Stencil Equal gating
 Shader "CloXray/Organ"
 {
     Properties
@@ -62,11 +46,10 @@ Shader "CloXray/Organ"
         // Out-of-body stencil control for the split-out SOLID ovary slot: the ovary writes a
         // "protect" bit (Ref=32, WriteMask=32) so the interior skips its pixels; the uterus
         // leaves both 0 (no write, stays see-through). Comp uses ReadMask 31 so Ref's bit-5
-        // doesn't affect the in/out-of-body test.
         _OutStencilRef ("OutBody Stencil Ref", Float) = 0
         _OutStencilWriteMask ("OutBody Stencil WriteMask", Float) = 0
         // In-body Forward ZTest (uterus=8 Always for x-ray-through-organ; the split ovary
-        // sets 3 Equal so only its nearest surface draws → no self-clip). And the MarkProtect
+        // sets 3 Equal so only its nearest surface draws -> no self-clip). And the MarkProtect
         // pass writes bit5 on the ovary footprint (ovary: Ref=37, WriteMask=32; uterus: 0).
         _OrganZTest ("Organ Forward ZTest", Float) = 8
         _ProtectRef ("Protect Stencil Ref", Float) = 5
@@ -76,36 +59,16 @@ Shader "CloXray/Organ"
         _Alpha ("AlphaValue", Float) = 1
         // Where the output alpha comes from. 1 (default) = mainTex.a * _Alpha (the
         // original x-ray look; the uterus keeps this). 0 = _Alpha only, IGNORING the
-        // texture alpha — used by the split-out SOLID ovary slot so that at _Alpha=1
-        // it is truly opaque. Needed because the ovary carves a hole in the interior
+        // texture alpha - used by the split-out SOLID ovary slot so that at _Alpha=1
         // (protect bit5); if the fill were semi-transparent the womb shell behind it
-        // would show through the hole as a faint silhouette.
         _AlphaFromTex ("Alpha From Texture (1=tex*Alpha, 0=Alpha only)", Range(0, 1)) = 1.0
         // Ovary interior-visibility mode (the split-out ovary/tube slot uses this).
-        //   0 (default, uterus) = LEGACY CARVE: MarkProtect leaves the ovary FRONT-wall
-        //       depth over its footprint (bit5), so the interior is hidden everywhere
-        //       under the ovary. Solid ovaries, can't see into tubes.
-        //   1 = FARTHEST back wall: gate on the outermost back face. See into hollow
-        //       tubes, balls solid. Best for a lone shell, but with two stacked ovary
-        //       shells it grabs the far shell's wall across the womb (cavity leaks).
-        //   2 = NEAREST back wall ("see into the FIRST shell"): gate on the near ovary's
-        //       own back wall, so a second shell behind the womb (+ the cavity between
-        //       them) stays hidden. Internal protrusions read solid. Default for ovary.
+        // 0 (default, uterus) = LEGACY CARVE: MarkProtect leaves the ovary FRONT-wall
+        // depth over its footprint (bit5), so the interior is hidden everywhere
+        // 1 = FARTHEST back wall: gate on the outermost back face. See into hollow
         [Enum(Carve,0,Farthest,1,Nearest,2)] _OvaryGateMode ("Ovary Interior Gate (0=carve,1=far,2=near)", Float) = 0
-        // OUTSIDE-BODY occlusion (womb used as a standalone studio item, stencil 0): the
-        // in-body x-ray/gate machinery is bypassed there, so the translucent uterus shell
-        // (ZWrite Off) writes no depth and can't occlude a far ovary behind it. Set this to
-        // 1 on the UTERUS to add a back-wall depth write outside body (Cull Front, ZTest
-        // Greater = farthest), so anything BEHIND the womb's far wall (the far ovary) is
-        // occluded while the cavity (in front of the back wall) and the near ovary stay
-        // visible. 0 = off (default; in-body is unaffected either way — pass is stencil-
-        // gated to stencil 0).
         [Enum(Off,0,On,1)] _OutBodyBackOcclude ("Outside-Body Back-Wall Occlude (uterus)", Float) = 0
         // Scene-depth confinement of the out-of-body depth wipe: where an OPAQUE scene surface
-        // (wall, prop, opaque clothes, another character) sits in FRONT of the womb's out-of-body
-        // footprint, suppress OutBodyBackClear/Depth so the foreign depth survives and the
-        // interior/cum hide behind it (fixes the "interior+cum bleed through clothes/props" leak).
-        // Open air is unaffected (depth texture holds the far background there).
         [Enum(Off,0,On,1)] _OutBodySceneConfine ("Outside-Body Scene Confine (uterus)", Float) = 0
         _OutBodySceneBias ("Outside-Body Scene Confine bias (m)", Float) = 0.015
         [MaterialToggle] _UseDetailRAsSpecularMap ("Use DetailR as Specular Map", Float) = 0
@@ -122,50 +85,33 @@ Shader "CloXray/Organ"
         _KKPRimAsDiffuse ("Body Rim As Diffuse", Range(0, 1)) = 0.0
         _KKPRimRotateX("Body Rim Rotate X", Float) = 0.0
         _KKPRimRotateY("Body Rim Rotate Y", Float) = 0.0
-        // Stencil pairing — must match the BodyReveal material on the same body mesh.
+        // Stencil pairing - must match the BodyReveal material on the same body mesh.
         // _StencilBody_Plus_1 must equal _StencilBody + 1.
-        // 4-slot pair scheme — body stencils are multiples of 4 (40, 44, 48, ...).
+        // 4-slot pair scheme - body stencils are multiples of 4 (40, 44, 48, ...).
         // Body = base, Organ = base+1, OrgInside = base+2. Slot base+3 is wasted
-        // but enables XrayMachine to use Mask=3 for cross-pair coverage.
         [IntRange] _StencilBody  ("Stencil: Body Ref (pairs: 4/8/12/16; +bit for windowed)",   Range(0, 255)) = 4
         [IntRange] _StencilBody_Plus_1 ("Stencil: Organ Ref (= Body + 1)",       Range(0, 255)) = 5
-        // Default 31 = gate on the low-5 region only (unchanged). A WINDOWED organ (e.g. a stomach revealed ONLY
+        // Default 31 = gate on the low-5 region only (unchanged). A WINDOWED organ (e.g. a stomach revealed only
         // under an x-ray plane) sets this to 31|bit (159 = 31|128) and _StencilBody/_Plus_1 to region|bit
         // (132/133 = 4|128, 5|128), so the in-body chain fires only where the region AND the plane-stamped bit coincide.
         [IntRange] _StencilReadMask ("Stencil Read Mask (31 = region only)", Range(1, 255)) = 31
         // Optional flat-colored outline drawn around the organ silhouette.
-        // _XrayOutlineWidth = 0 → no outline. Width is in NDC units, ~0.005 ≈ 5px
+        // _XrayOutlineWidth = 0 -> no outline. Width is in NDC units, ~0.005 ≈ 5px
         // on a 1080p screen. Outline color includes alpha for transparency.
-        // Note: works well on convex/simple shapes; complex hollow meshes
-        // (e.g. tubes with inner surfaces) will show artifacts inside the
-        // mesh because vertex extrusion can't tell silhouette from interior.
         _XrayOutlineWidth ("X-ray Outline Width (NDC, 0=off)", Range(0, 0.05)) = 0.0
         _XrayOutlineColor ("X-ray Outline Color (alpha = transparency)", Color) = (1, 1, 1, 1)
         // Outline color blend with organ's _Color. 0 = pure XrayOutlineColor,
         // 1 = XrayOutlineColor multiplied by organ Color (tinted outline).
         _XrayOutlineColorBlend ("Outline: blend w/ organ Color", Range(0, 1)) = 0.0
         // Outline cull mode. Stencil-dedup (bit 7) is always on in the Outline
-        // pass, the OLD alpha-stacking problem with Off is gone — each screen
-        // pixel paints exactly once regardless of overlapping shell layers.
-        //   Off (default) = full coverage, solid look, no stacking artifacts.
-        //   Front = back-faces only → thin clean ring outside silhouette.
-        //   Back = front-faces only → can leave gaps on sharp corners.
         [Enum(Off,0,Front,1,Back,2)] _XrayOutlineCull ("Outline Cull (Off=solid, Front=ring)", Range(0, 2)) = 0
         // Extrusion space. World (default) = vertex pushed along world normal
-        // by width in meters (zoom-aware: outline shrinks with distance). NDC =
-        // vertex pushed in clip-space along projected normal (screen-constant
-        // width, often closes holes on pointy/sharp objects because direction is
-        // normalized in 2D screen space).
         [Enum(World,0,NDC,1)] _XrayOutlineExtrusionMode ("Outline Extrusion (World=zoom, NDC=screen)", Range(0, 1)) = 0
         // When the organ mesh extends beyond the body silhouette, this slider
         // controls how visible the "poking out" parts are. 0 = invisible
         // (default, organ stays hidden outside body), 1 = fully visible.
         _OutsideOfBodyAlpha ("Outside-Body Visibility", Range(0, 1)) = 0.0
         // X-ray ALPHA-TO-BLACK. In the plane / x-ray-screen view the framebuffer behind the organ is the BODY SKIN
-        // (the black screen draws AFTER the organ), so lowering _Alpha blends toward skin -> the organ washes out to
-        // pale/white instead of going see-through. With this ON, the organ instead fades toward BLACK by _Alpha
-        // (premultiplied colour, opaque output) -> over the black x-ray backdrop that reads as true semi-transparency.
-        // Leave OFF (default, unchanged) for the normal in-body look where blending with the skin is wanted.
         [Enum(Off,0,On,1)] _XrayAlphaToBlack ("X-ray: Alpha fades to black (plane view)", Float) = 0.0
         // Brightness multiplier on the final lit color. 1 = normal, < 1 darker,
         // > 1 brighter. Lets you tune organ visibility independently of Alpha.
@@ -176,7 +122,7 @@ Shader "CloXray/Organ"
         LOD 600
         Tags { "Queue" = "Transparent+500" "RenderType" = "Transparent" }
 
-        // Shared lighting code — vertOrgan/fragOrgan used by the Forward pass.
+        // Shared lighting code - vertOrgan/fragOrgan used by the Forward pass.
         CGINCLUDE
         #include "UnityCG.cginc"
         #include "AutoLight.cginc"
@@ -453,7 +399,6 @@ Shader "CloXray/Organ"
         }
 
         // Outside-body variant: same full KK lighting, alpha additionally
-        // multiplied by _OutsideOfBodyAlpha so the user can fade the parts of
         // the organ that poke out beyond the body silhouette.
         fixed4 fragOrganOutside(Varyings i, int faceDir : VFACE) : SV_Target
         {
@@ -464,7 +409,6 @@ Shader "CloXray/Organ"
 
         // Forward-pass wrapper. Default: returns fragOrgan and the pass's Blend SrcAlpha OneMinusSrcAlpha does
         // normal alpha blending with the framebuffer. With _XrayAlphaToBlack=1 it instead premultiplies rgb*alpha
-        // and outputs opaque, so lowering Alpha fades the organ toward black (true see-through over the x-ray screen).
         fixed4 fragOrganXray(Varyings i, int faceDir : VFACE) : SV_Target
         {
             fixed4 c = fragOrgan(i, faceDir);
@@ -479,12 +423,7 @@ Shader "CloXray/Organ"
         // ----------------------------------------------------------------
         // Pass 0: DepthClear
         // At body-stencil pixels (43), push depth to far plane (1.0).
-        // Wipes the body's depth so the Forward pass's ZTest LEqual can
-        // pass for organ fragments (which would otherwise be rejected as
         // "behind" the body). Only fires at stencil==43, so once an organ
-        // has stamped 44 here, depth is preserved → next organ z-tests
-        // against the prior organ's depth (correct inter-organ ordering).
-        // ----------------------------------------------------------------
         Pass
         {
             Name "DepthClear"
@@ -526,13 +465,6 @@ Shader "CloXray/Organ"
 
         // ----------------------------------------------------------------
         // Pass 1: DepthWrite
-        // Establish the closest organ depth at each pixel via ZTest Less.
-        // Among multiple front-facing organ fragments at one pixel — including
-        // the outer-near AND inner-far surfaces of a hollow tube — only the
-        // closest survives. This is what lets Forward use ZTest Equal below
-        // to render exactly one fragment per pixel (no within-organ leakage
-        // from alpha blending stacking inner surfaces over outer ones).
-        // ----------------------------------------------------------------
         Pass
         {
             Name "DepthWrite"
@@ -562,8 +494,7 @@ Shader "CloXray/Organ"
 
         // ----------------------------------------------------------------
         // Pass 2: StencilWrite
-        // Stamp stencil 43 → 44 at body pixels covered by this organ.
-        // ----------------------------------------------------------------
+        // Stamp stencil 43 -> 44 at body pixels covered by this organ.
         Pass
         {
             Name "StencilWrite"
@@ -593,18 +524,13 @@ Shader "CloXray/Organ"
         }
 
         // ----------------------------------------------------------------
-        // Pass: MarkProtect — runs after StencilWrite (stencil == organ here). The split-out
+        // Pass: MarkProtect - runs after StencilWrite (stencil == organ here). The split-out
         // SOLID ovary slot sets the protect bit (bit5) over its footprint (Ref=37, WriteMask=32:
         // Comp tests low5==organ via ReadMask 31, Replace writes only bit5). The interior's
-        // DepthClear then skips bit5 pixels, so the ovary's depth survives and the interior
-        // never repaints over it. Uterus: WriteMask 0 → no-op.
-        // ----------------------------------------------------------------
         Pass
         {
             Name "MarkProtect"
-            // ZTest = _OrganZTest (ovary=Equal): mark bit5 ONLY where the ovary is the nearest
-            // surface (actually visible). Using Always would mark it even behind the womb, so the
-            // interior would skip there and the far (behind-womb) ovary would show through.
+            // ZTest = _OrganZTest (ovary=Equal): mark bit5 only where the ovary is the nearest
             ZTest [_OrganZTest]
             ZWrite Off
             ColorMask 0
@@ -632,9 +558,8 @@ Shader "CloXray/Organ"
             {
                 // Gate the protect bit by visibility: when the ovary is effectively
                 // invisible (slider _Alpha ~ 0) DISCARD so the stencil Replace never
-                // runs → bit5 not written → the interior is NOT carved → no silhouette
-                // of the bare womb shell where a transparent ovary used to protect.
-                // (For the ovary _AlphaFromTex=0 → its visible alpha is exactly _Alpha.)
+                // runs -> bit5 not written -> the interior is NOT carved -> no silhouette
+                // (For the ovary _AlphaFromTex=0 -> its visible alpha is exactly _Alpha.)
                 if (_Alpha < 0.004) discard;
                 return 0;
             }
@@ -642,28 +567,16 @@ Shader "CloXray/Organ"
         }
 
         // ----------------------------------------------------------------
-        // Pass 3: Forward — full KK lighting, alpha-blended on body
-        // ZTest Always (THE proven design): paint organ colour over EVERY organ pixel
-        // regardless of depth, so ovaries/tubes sitting behind the uterus shell still get
-        // organ colour → they read SOLID. The interior (OrgInside) only paints its own
-        // submesh footprint (the cavity walls) via its DepthClear/DepthWrite gating; where
-        // it has no triangles — i.e. over the ovaries — the organ colour survives → ovaries
-        // solid OVER the cavity. (A ZTest Equal/"nearest-only" variant breaks this: it
-        // occludes behind-shell ovaries and lets the cavity/background show. Do not change
-        // this without re-checking ovaries-over-cavity.)
+        // Pass 3: Forward - full KK lighting, alpha-blended on body
         // ZWrite Off: don't disturb the primed organ depth (the liquid sorts against it).
-        // ----------------------------------------------------------------
         Pass
         {
             Name "Forward"
             Tags { "LightMode" = "ForwardBase" }
-            // uterus = Always (x-ray through organs); split ovary = Equal (nearest surface
-            // only → no self-clip; the depth Pass 0/1 primed the nearest).
             ZTest [_OrganZTest]
             ZWrite Off
             // Blend SrcAlpha OneMinusSrcAlpha works for both fragOrganXray outputs:
-            //  • default: (rgb, alpha) → standard alpha blend with framebuffer.
-            //  • _XrayAlphaToBlack=1: (rgb*alpha, 1) → 1*src + 0*dst = src, opaque fade-to-black.
+            // • _XrayAlphaToBlack=1: (rgb*alpha, 1) -> 1*src + 0*dst = src, opaque fade-to-black.
             Blend SrcAlpha OneMinusSrcAlpha
             Cull [_CullOption]
 
@@ -686,23 +599,10 @@ Shader "CloXray/Organ"
 
         // ================================================================
         // BACK-WALL DEPTH GATE (3 passes). The interior (OrgInside, queue 3502)
-        // ZTest LEqual against whatever depth these leave over the ovary footprint
         // (bit5): interior shows where it's IN FRONT of that depth, hidden where behind.
         // Gated by stencil bit5 (set by MarkProtect only where the ovary is the visible
-        // nearest surface → never behind the womb, never on the uterus) and by _Alpha.
-        //   _OvaryGateMode 0 = legacy carve  (all three discard → front-wall depth stays)
-        //   _OvaryGateMode 1 = FARTHEST back wall (single BackDepthFar pass). Best for a
-        //       lone shell / internal protrusions, but with two stacked ovary shells it
-        //       grabs the FAR shell's back wall (across the womb) and the womb cavity
-        //       between them leaks over the near ovary.
-        //   _OvaryGateMode 2 = NEAREST back wall ("see into the FIRST shell"): clear the
-        //       footprint to FAR, then ZTest Less keeps the nearest back face = the near
-        //       ovary's own back wall. Anything behind it (a 2nd ovary shell + the womb
-        //       cavity between them) is correctly hidden. Internal protrusions read as
-        //       solid rather than see-through. This is the default for the ovary slot.
-        // ================================================================
 
-        // Pass: BackDepthClear (mode 2 only) — push the bit5 footprint depth to FAR so
+        // Pass: BackDepthClear (mode 2 only) - push the bit5 footprint depth to FAR so
         // the following ZTest Less can select the nearest back face.
         Pass
         {
@@ -740,9 +640,8 @@ Shader "CloXray/Organ"
             ENDCG
         }
 
-        // Pass: BackDepthFar (mode 1 only) — ZTest Greater keeps the FARTHEST back face
+        // Pass: BackDepthFar (mode 1 only) - ZTest Greater keeps the FARTHEST back face
         // (order-independent). Buffer still holds the front-wall depth here (mode 1 does
-        // NOT clear), so back faces (all farther) compete and the max wins.
         Pass
         {
             Name "BackDepthFar"
@@ -770,10 +669,7 @@ Shader "CloXray/Organ"
             ENDCG
         }
 
-        // Pass: BackDepthNear (mode 2 only) — after BackDepthClear pushed the footprint
-        // to FAR, ZTest Less keeps the NEAREST back face = the near ovary's own back
-        // wall, so a second ovary shell behind the womb (and the cavity between them) is
-        // excluded.
+        // Pass: BackDepthNear (mode 2 only) - after BackDepthClear pushed the footprint
         Pass
         {
             Name "BackDepthNear"
@@ -802,23 +698,12 @@ Shader "CloXray/Organ"
         }
 
         // ----------------------------------------------------------------
-        // Pass 4: OutsideBody — organ poking outside the body silhouette (stencil 0).
-        // Single transparent pass (ZTest LEqual, ZWrite Off, Cull Back, alpha) — the proven
-        // working state. Shares vertOrgan/fragOrganOutside with Forward, so the out-of-body
-        // part (e.g. the ovaries) matches the in-body ghosty x-ray look and sorts naturally
-        // with the in-body organ. (A ZWrite-On depth-prime + back/front split was tried to
-        // force opaque ordering, but it mis-sorted the out-of-body ovaries against the womb —
-        // reverted to this single pass.)
-        // ----------------------------------------------------------------
+        // Pass 4: OutsideBody - organ poking outside the body silhouette (stencil 0).
         Pass
         {
             Name "OutsideBody"
             Tags { "LightMode" = "ForwardBase" }
             ZTest LEqual
-            // ovary slot sets _AlphaOptionZWrite=1 → writes depth → self-sorts (no self-clip);
-            // uterus keeps 0 → see-through. Stencil: ovary (Ref/WriteMask=32) writes the protect
-            // bit (bit5) while still drawing out-of-body (Comp uses ReadMask 31); uterus (0/0)
-            // writes nothing. The interior OutsideBody reads bit5 and skips ovary pixels.
             ZWrite [_AlphaOptionZWrite]
             Blend SrcAlpha OneMinusSrcAlpha
             Cull Back
@@ -835,23 +720,10 @@ Shader "CloXray/Organ"
         }
 
         // ================================================================
-        // OUTSIDE-BODY far-ovary occluder — ONLY when _OutBodyBackOcclude=1 (set on the
-        // UTERUS) and ONLY outside body (stencil low5 == 0). The womb shell's OutsideBody
-        // pass is ZWrite Off (translucent), so without this it writes no depth and a far
-        // ovary behind it draws through. These two passes leave the womb's FARTHEST back-
-        // wall depth over its footprint, so the far ovary (behind it) is occluded while
-        // the cavity + near ovary (in front of it) stay visible. Runs in the uterus
-        // material (queue 3500), before the ovary OutsideBody (3501). ColorMask 0 keeps
-        // the shell's own translucent paint intact.
-        //
-        // Why two passes: outside body the depth buffer holds the BACKGROUND (far), and
-        // the womb back wall is NEARER than that, so a lone "ZTest Greater" (farther
-        // passes) would never write. So first CLEAR the footprint to the NEAR plane, then
-        // ZTest Greater builds up to the FARTHEST back face (true outer wall) order-
-        // independently. (Farthest, not nearest, so the cavity in front stays visible.)
-        // ================================================================
+        // outside-BODY far-ovary occluder - only when _OutBodyBackOcclude=1 (set on the
+        // UTERUS) and only outside body (stencil low5 == 0). The womb shell's OutsideBody
 
-        // Pass: OutBodyBackClear — push the womb footprint depth to the NEAR plane.
+        // Pass: OutBodyBackClear - push the womb footprint depth to the NEAR plane.
         Pass
         {
             Name "OutBodyBackClear"
@@ -890,9 +762,6 @@ Shader "CloXray/Organ"
                 if (_OutBodyBackOcclude < 0.5) discard;
                 if (_Alpha < 0.004) discard;
                 // Scene-depth confinement: an opaque scene surface in FRONT of the womb's front
-                // wall at this pixel (clothes/prop/wall/other body) keeps its depth — no wipe, so
-                // the interior/cum hide behind it via the existing LEqual coupling. Open air =
-                // background (far) = gate passes = today's behavior.
                 if (_OutBodySceneConfine >= 0.5)
                 {
                     float sceneEye = LinearEyeDepth(SAMPLE_DEPTH_TEXTURE(_CameraDepthTexture, i.spos.xy / i.spos.w));
@@ -903,7 +772,7 @@ Shader "CloXray/Organ"
             ENDCG
         }
 
-        // Pass: OutBodyBackDepth — ZTest Greater (vs the just-cleared NEAR plane) writes
+        // Pass: OutBodyBackDepth - ZTest Greater (vs the just-cleared NEAR plane) writes
         // the FARTHEST womb back wall (true outer rear), the gate the far ovary fails.
         Pass
         {
@@ -935,7 +804,7 @@ Shader "CloXray/Organ"
                 if (_OutBodyBackOcclude < 0.5) discard;
                 if (_Alpha < 0.004) discard;
                 // Scene-depth confinement: don't write the back wall over an opaque scene surface
-                // that sits in front of it — the foreign depth must keep occluding (see Clear pass).
+                // that sits in front of it - the foreign depth must keep occluding (see Clear pass).
                 if (_OutBodySceneConfine >= 0.5)
                 {
                     float sceneEye = LinearEyeDepth(SAMPLE_DEPTH_TEXTURE(_CameraDepthTexture, i.spos.xy / i.spos.w));
@@ -949,11 +818,7 @@ Shader "CloXray/Organ"
         // ----------------------------------------------------------------
         // Pass 5: Outline (optional flat-color rim around the organ)
         // Renders an extruded silhouette in _XrayOutlineColor, gated by stencil
-        // so it only paints body pixels (Ref 43) — never on top of the organ
-        // itself (which has stencil 44 by now). ZTest Always so it's visible
-        // regardless of the body's depth (matches the x-ray look).
-        // _XrayOutlineWidth = 0 → vertices aren't pushed → no visible outline.
-        // ----------------------------------------------------------------
+        // so it only paints body pixels (Ref 43) - never on top of the organ
         Pass
         {
             Name "Outline"
@@ -964,19 +829,8 @@ Shader "CloXray/Organ"
 
             // First-fragment-wins dedup using stencil bit 7. Without this, every
             // extruded shell fragment at a pixel alpha-blends (so 3 overlapping
-            // layers + alpha 0.5 → looks like alpha 0.875, color drift, washout).
-            // With it, only the first shell fragment paints — alpha stays true.
-            //
+            // layers + alpha 0.5 -> looks like alpha 0.875, color drift, washout).
             // ReadMask 159 (=128+31) tests bits 0-4 AND bit 7.
-            // Ref [_StencilBody] (bit 7 = 0 in any of our values 4-18).
-            // Comp Equal: pass only if (stencil & 159) == StencilBody — i.e. low5
-            //   bits match body AND bit 7 currently 0 (not yet painted this frame).
-            // WriteMask 128, Pass Invert: flip bit 7 from 0 to 1 on pass.
-            // Subsequent shell fragments at the same pixel see bit 7 = 1, fail.
-            //
-            // Cleanup is automatic: the BodyReveal shader (queue 2500) runs each
-            // frame before this outline pass (queue 3500+) with Pass Replace and
-            // default WriteMask 255, so bit 7 gets reset to 0 every frame.
             Stencil
             {
                 Ref [_StencilBody]
@@ -996,7 +850,7 @@ Shader "CloXray/Organ"
             float  _XrayOutlineColorBlend;
             float  _XrayOutlineExtrusionMode;
             // _Color, _Color2, _Color3, _MainTex, _ColorMask, etc. are declared
-            // by KKPItemInput.cginc (via CGINCLUDE) — available without redecl.
+            // by KKPItemInput.cginc (via CGINCLUDE) - available without redecl.
 
             struct appdata
             {
@@ -1029,11 +883,6 @@ Shader "CloXray/Organ"
                 else
                 {
                     // NDC-space extrusion. Project the world normal into clip
-                    // space, normalize its xy, and push the clip-space vertex
-                    // along that direction. Width becomes screen-constant
-                    // (looks the same at any zoom). The xy-normalize tends to
-                    // close holes at sharp corners because displacement direction
-                    // is meaningful in 2D regardless of normal-z sign.
                     float4 clipPos = UnityObjectToClipPos(v.vertex);
                     float3 clipNormal = mul((float3x3)UNITY_MATRIX_VP, worldNormal);
                     float2 ndcOffset = normalize(clipNormal.xy + 1e-6) * _XrayOutlineWidth;
@@ -1051,8 +900,6 @@ Shader "CloXray/Organ"
             {
                 // No-outline early-out. At width ≈ 0 the shell is not extruded
                 // but its triangles still rasterize onto body-stencil pixels at
-                // the organ boundary and would paint outline color there. Discard
-                // those fragments so width=0 truly means no visible outline.
                 if (_XrayOutlineWidth < 0.0001) discard;
 
                 // Sample organ's actual color so the outline can tint with it.
@@ -1067,15 +914,14 @@ Shader "CloXray/Organ"
                                       _XrayOutlineColor.rgb * organDiffuse,
                                       _XrayOutlineColorBlend);
 
-                // Solid outline — uniform alpha (dedup stencil keeps it single-layer).
+                // Solid outline - uniform alpha (dedup stencil keeps it single-layer).
                 return fixed4(baseRGB, _XrayOutlineColor.a);
             }
             ENDCG
         }
 
         // ----------------------------------------------------------------
-        // Pass 5: ShadowCaster — invisible, no shadow casting
-        // ----------------------------------------------------------------
+        // Pass 5: ShadowCaster - invisible, no shadow casting
         Pass
         {
             Name "ShadowCaster"

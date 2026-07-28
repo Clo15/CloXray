@@ -1,28 +1,9 @@
 // CloXray/OrgInside
-// For objects that cross the organ/body boundary (e.g. a tube entering the body, or the penis).
-// Behaviour per pixel:
-//   Outside body entirely  → renders normally (ZTest LEqual passes freely)
-//   Inside body, outside organ → hidden (body depth in buffer; ZTest LEqual fails)
-//   Inside organ (low-5 stencil region = 5, "body+1") → visible through body, multiple
-//     OrgInside objects depth-sort correctly against each other.
-//
-// How it works (inside-organ case) — see XRAY_RENDER_MODEL.md §2 (stencil byte) and §3:
-//   Pass 0 (DepthClear): where the organ region == 5, push depth to the FAR
-//     plane and IncrSat the region 5 → 6. IncrSat fires only ONCE per pixel,
-//     so subsequent OrgInside objects don't wipe each other's depth.
-//   Pass 1 (DepthWrite): where the region >= 5 (5 or 6), ZTest Less + ZWrite On. Multiple
-//     OrgInside objects compete here — only the closest one writes its depth.
-//   Pass 2 (FORWARD): ZTest LEqual + ZWrite On, NO stencil pair check (Comp NotEqual
-//     Ref 0, ReadMask 31). The depth test alone gates visibility:
-//     – Outside body: buffer holds sky depth → LEqual passes → visible.
-//     – Inside body, outside organ: buffer holds body depth (closer than this
-//       object) → LEqual FAILS → hidden.
-//     – Inside organ: depth was set to closest OrgInside in Pass 1 → only the
-//       closest OrgInside passes LEqual at each pixel.
-//
-// Stencil = the low-5 region (see the [IntRange] pair sliders below): Pair A is
-// body=4 / organ=5 / orginside-cavity=6. Multi-pair OrgInside (Pair B = 8/9/10, …)
-// is the known unfinished frontier — not yet validated.
+// Inside organ (low-5 stencil region = 5, "body+1") -> visible through body, multiple
+// Pass 0 (DepthClear): where the organ region == 5, push depth to the FAR
+// plane and IncrSat the region 5 -> 6. IncrSat fires only once per pixel,
+// so subsequent OrgInside objects don't wipe each other's depth.
+// Pass 1 (DepthWrite): where the region >= 5 (5 or 6), ZTest Less + ZWrite On. Multiple
 Shader "CloXray/OrgInside"
 {
     Properties
@@ -79,23 +60,18 @@ Shader "CloXray/OrgInside"
         _KKPRimAsDiffuse ("Body Rim As Diffuse", Range(0, 1)) = 0.0
         _KKPRimRotateX("Body Rim Rotate X", Float) = 0.0
         _KKPRimRotateY("Body Rim Rotate Y", Float) = 0.0
-        // 4-slot pair scheme. OrgInside writes Body+2 (orginside slot).
-        //   Pair A: body=4, organ=5, orginside(cavity)=6
-        //   Pair B: body=8, organ=9, orginside(cavity)=10
-        //   Pair C: body=12, organ=13, orginside(cavity)=14
-        //   Pair D: body=16, organ=17, orginside(cavity)=18
+        // Pair A: body=4, organ=5, orginside(cavity)=6
+        // Pair B: body=8, organ=9, orginside(cavity)=10
+        // Pair C: body=12, organ=13, orginside(cavity)=14
         [IntRange] _StencilBody_Plus_1 ("Stencil: Organ Ref (match Organ)", Range(2, 18)) = 5
         [IntRange] _StencilBody  ("Stencil: Body Ref (match BodyReveal)",  Range(1, 17)) = 4
-        // When the OrgInside object is inside the body but OUTSIDE any organ,
-        // it normally is hidden by body skin. This slider lets it show as a
-        // semi-transparent ghost through the body. 0 = invisible (default,
-        // matches old behavior), 1 = fully opaque. Try 0.2-0.4 for a faint ghost.
+        // When the OrgInside object is inside the body but outside any organ,
         _BehindBodyAlpha ("Behind-Body Visibility", Range(0, 1)) = 0.0
         // Optional flat-colored outline drawn around the OrgInside silhouette
         // wherever it sits inside the body region.
         _XrayOutlineWidth ("X-ray Outline Width (world units)", Range(0, 0.05)) = 0.0
         _XrayOutlineColor ("X-ray Outline Color (alpha=transparency)", Color) = (1, 1, 1, 1)
-        // Visibility when the object is OUTSIDE any character body (stencil=0).
+        // Visibility when the object is outside any character body (stencil=0).
         // 1 = fully visible (default, matches old behavior). 0 = invisible.
         _OutsideOfBodyAlpha ("Outside-Body Visibility", Range(0, 1)) = 1.0
         // Open the x-ray window on up-the-open-canal rays from below (pixels the
@@ -103,6 +79,11 @@ Shader "CloXray/OrgInside"
         // 1 = on (see up the open canal). The womb's own interior material bakes this
         // ON explicitly; plugin-applied OrgInside (e.g. the penis) inherits this 0 default.
         [Enum(Off,0,On,1)] _BottomWindow ("Bottom Window (see up the open canal)", Float) = 0
+        // Write NEAR depth over the outside-body silhouette so anything drawn LATER at those pixels
+        // (the plugin's original-look penis re-draw copy, queue 3502) is depth-rejected - the
+        // outside-body look stays 100% the original material's own painting from its own queue.
+        // Used by the plugin's penis x-ray "carve" copy (with _OutsideOfBodyAlpha=0, making the
+        [Enum(Off,0,On,1)] _OutsideShieldDepth ("Outside Shield Depth (block later re-draws)", Float) = 0
     }
     SubShader
     {
@@ -111,9 +92,6 @@ Shader "CloXray/OrgInside"
         Tags { "Queue" = "Transparent+501" "RenderType" = "Transparent" }
 
         // Shared full KK lighting code for Forward, BehindBody, OutsideBody.
-        // fragOrgInside  = full lighting (used by Forward)
-        // fragOrgInsideBehind  = full lighting * _BehindBodyAlpha (BehindBody)
-        // fragOrgInsideOutside = full lighting * _OutsideOfBodyAlpha (OutsideBody)
         CGINCLUDE
         #include "UnityCG.cginc"
         #include "AutoLight.cginc"
@@ -132,6 +110,7 @@ Shader "CloXray/OrgInside"
 
         float _BehindBodyAlpha;
         float _OutsideOfBodyAlpha;
+        float _OutsideShieldDepth;
 
         float3 AmbientShadowAdjust(){
             float4 u_xlat5; float4 u_xlat6; float u_xlat30; bool u_xlatb30; float u_xlat31;
@@ -169,6 +148,14 @@ Shader "CloXray/OrgInside"
             float4 projbiTan; projbiTan.xyz = biTan; projbiTan.xzw = projPos.xwy * 0.5;
             o.shadowCoordinate.zw = projPos.zw; o.shadowCoordinate.xy = projbiTan.zz + projbiTan.xw;
         #endif
+            return o;
+        }
+
+        Varyings vertOrgInsideShield(VertexData v)
+        {
+            Varyings o = vertOrgInside(v);
+            if (_OutsideShieldDepth > 0.5)
+                o.posCS.z = UNITY_NEAR_CLIP_VALUE * 0.9999 * o.posCS.w;
             return o;
         }
 
@@ -307,25 +294,8 @@ Shader "CloXray/OrgInside"
         ENDCG
 
         // ----------------------------------------------------------------
-        // Pass: BottomWindow (must run FIRST, before DepthClear)
-        // Up-the-open-vagina rays have no uterus-EXTERIOR coverage, so the
-        // exterior's DepthClear/StencilWrite never ran there: stencil stays
-        // pure body (low5 == _StencilBody, bit5 clear) and the body depth
-        // blocks the canal. At exactly those pixels — pure body AND covered
-        // by this interior mesh — wipe the body depth to FAR and promote
-        // 4->5, exactly what the exterior would have done. The existing
+        // Pass: BottomWindow (must run first, before DepthClear)
         // chain (DepthClear 5->6, DepthWrite, Forward, Liquid, veil) then
-        // runs unchanged and the pixel ends bit-identical to a normal
-        // x-ray-window pixel. Everywhere the exterior did cover, the pixel
-        // is already 5 -> Comp Equal vs 4 skips -> in-body look unchanged.
-        // ReadMask 63: also requires bit5 clear (never fire on the ovary's
-        // protected pixels; reachable states make this belt-and-braces).
-        // WriteMask 31: IncrSat touches low5 only — bit6 (cum paint-once)
-        // and bit7 (outline dedup) are preserved and masked out of the test.
-        // Cull [_CullOption] (= Back on the interior bake, inward normals):
-        // MUST match DepthWrite/Forward so window coverage stays a subset of
-        // what Forward can paint — do not change to Off.
-        // ----------------------------------------------------------------
         Pass
         {
             Name "BottomWindow"
@@ -369,7 +339,6 @@ Shader "CloXray/OrgInside"
             fixed4 frag(v2f i) : SV_Target
             {
                 // Toggle OFF = discard = no stencil write, no depth write:
-                // byte-exact old behavior.
                 if (_BottomWindow < 0.5) discard;
                 return 0;
             }
@@ -380,8 +349,6 @@ Shader "CloXray/OrgInside"
         // Pass 0: DepthClear (fires once per organ pixel, IncrSat to 45)
         // At stencil=44 pixels, push depth to FAR. Stamp stencil to 45 so
         // subsequent OrgInside objects skip this pass and don't wipe the
-        // depth that the first one (and Pass 1) wrote.
-        // ----------------------------------------------------------------
         Pass
         {
             Name "DepthClear"
@@ -389,8 +356,6 @@ Shader "CloXray/OrgInside"
             ZWrite On
             ColorMask 0
             // Honour _CullOption (was hardcoded Cull Back). For an inner-cavity
-            // mesh, set _CullOption = Front so the near wall doesn't write depth
-            // — otherwise it blocks anything (e.g. cum) behind it.
             Cull [_CullOption]
 
             Stencil
@@ -401,8 +366,6 @@ Shader "CloXray/OrgInside"
                 Comp Equal
                 Pass IncrSat
             }
-            // ReadMask 63 (was 31): the split ovary marks bit5, so this DepthClear skips the
-            // ovary's pixels — its depth survives and the interior never repaints over it.
 
             CGPROGRAM
             #pragma vertex vert
@@ -431,17 +394,13 @@ Shader "CloXray/OrgInside"
         // ----------------------------------------------------------------
         // Pass 1: DepthWrite (inter-OrgInside depth competition)
         // At stencil >= 44 (organ region, possibly already incremented to 45),
-        // write THIS object's depth with ZTest Less. Among multiple OrgInside
-        // objects covering the same pixel, only the closest's depth survives.
-        // After this pass, depth at each organ pixel = closest OrgInside depth.
-        // ----------------------------------------------------------------
         Pass
         {
             Name "DepthWrite"
             ZTest Less
             ZWrite On
             ColorMask 0
-            // Same as DepthClear — honour _CullOption so the near wall depth
+            // Same as DepthClear - honour _CullOption so the near wall depth
             // doesn't get written for inner-cavity meshes.
             Cull [_CullOption]
 
@@ -467,12 +426,9 @@ Shader "CloXray/OrgInside"
         }
 
         // ----------------------------------------------------------------
-        // Pass 2: FORWARD — full KK item lighting, normal ZTest LEqual
+        // Pass 2: FORWARD - full KK item lighting, normal ZTest LEqual
         // No stencil check: depth alone gates visibility. Inside organ, the
         // depth was set in Pass 1 to the closest OrgInside's depth, so only
-        // that one passes. Outside body, depth = scene depth so we render
-        // normally. Inside body but outside organ, body depth blocks us.
-        // ----------------------------------------------------------------
         Pass
         {
             Name "Forward"
@@ -482,9 +438,8 @@ Shader "CloXray/OrgInside"
             Blend SrcAlpha OneMinusSrcAlpha
             Cull [_CullOption]
 
-            // Stencil NotEqual 0: only fire INSIDE a character body (any
+            // Stencil NotEqual 0: only fire inside a character body (any
             // stenciled region). Outside body (stencil = 0) is handled by
-            // the separate OutsideBody pass so its alpha can be controlled.
             Stencil
             {
                 Ref 0
@@ -506,14 +461,8 @@ Shader "CloXray/OrgInside"
 
         // ----------------------------------------------------------------
         // Pass 2b: BehindBody (semi-transparent visibility through body skin)
-        // ----------------------------------------------------------------
         // Pass 2a: OutsideBody (object outside any character body)
         // Forward pass is gated to stencil != 0 now, so this handles
-        // stencil == 0 (no body at this pixel). Default _OutsideOfBodyAlpha = 1
-        // matches the old behavior (full visibility outside body); lower it
-        // to fade out the object when not contained.
-        // Uses simplified texture+tint shading.
-        // ----------------------------------------------------------------
         Pass
         {
             Name "OutsideBody"
@@ -532,12 +481,9 @@ Shader "CloXray/OrgInside"
             }
 
             CGPROGRAM
-            // ReadMask 63 (was 31): also tests bit5 — the solid ovary slot sets bit5 over its
-            // footprint, so this pass fails there and the interior does NOT paint over the ovary.
-            // Uses shared vertOrgInside / fragOrgInsideOutside (full KK
-            // lighting with alpha multiplied by _OutsideOfBodyAlpha).
+            // Uses vertOrgInsideShield (= vertOrgInside unless _OutsideShieldDepth=1, which writes
             #pragma target 3.0
-            #pragma vertex vertOrgInside
+            #pragma vertex vertOrgInsideShield
             #pragma fragment fragOrgInsideOutside
             #pragma multi_compile _ VERTEXLIGHT_ON
             #pragma multi_compile _ SHADOWS_SCREEN
@@ -546,16 +492,8 @@ Shader "CloXray/OrgInside"
 
         // ----------------------------------------------------------------
         // Pass 2b: BehindBody (semi-transparent visibility through body skin)
-        // Renders this object inside the body silhouette but OUTSIDE any organ
-        // — exactly the case the regular Forward pass hides via depth test.
-        // ZTest Always so the body skin's depth doesn't cull us. Stencil
+        // ZTest Always so the body skin's depth doesn't cull it. Stencil
         // gates rendering to body-only pixels (stencil = _StencilBody, NOT
-        // organ stencil). Output alpha is multiplied by _BehindBodyAlpha to
-        // create a "ghost through skin" effect. _BehindBodyAlpha = 0 → no
-        // visible ghost (preserves the old behavior).
-        // Uses simplified texture+tint shading (not full KK lighting) since
-        // this is a low-fidelity ghost visualization.
-        // ----------------------------------------------------------------
         Pass
         {
             Name "BehindBody"
@@ -566,9 +504,6 @@ Shader "CloXray/OrgInside"
             Blend SrcAlpha OneMinusSrcAlpha
 
             // ReadMask 31: ignore bits 5 (free), 6 (OrganMark) and 7 (set by the
-            // OutlineMark pass below) so this still fires
-            // at body-region pixels regardless of whether the OrgInside
-            // silhouette is marked there or whether the suit's organ-mark is set.
             Stencil
             {
                 Ref [_StencilBody]
@@ -590,16 +525,8 @@ Shader "CloXray/OrgInside"
 
         // ----------------------------------------------------------------
         // Pass 2c: OutlineMark (sets stencil bit 7 at OrgInside silhouette in body region)
-        // Marks pixels covered by the OrgInside mesh AND inside any body
-        // (stencil bit 0 = 1 means body, bit 0 = 0 means organ — exploits
-        // that StencilRef is always odd in our scheme). Bit 7 is unused
-        // elsewhere; we set it WITHOUT touching the lower bits so other
-        // passes that read the body/organ stencil still work.
-        // The Outline pass below then checks stencil exactly equals
-        // _StencilBody (no ReadMask), so it WON'T fire at marked pixels,
-        // making the outline appear only OUTSIDE the OrgInside silhouette
-        // (the extruded ring region).
-        // ----------------------------------------------------------------
+        // (stencil bit 0 = 1 means body, bit 0 = 0 means organ - exploits
+        // that StencilRef is always odd in the scheme). Bit 7 is unused
         Pass
         {
             Name "OutlineMark"
@@ -609,7 +536,7 @@ Shader "CloXray/OrgInside"
             Cull Back
 
             // Comp Equal Ref 129 ReadMask 1: compares (stencil & 1) with
-            // (129 & 1) = 1 — i.e. passes when stencil bit 0 = 1 (body region).
+            // (129 & 1) = 1 - i.e. passes when stencil bit 0 = 1 (body region).
             // Pass Replace WriteMask 128: writes Ref's bit 7 (=1) to stencil's
             // bit 7, leaving other bits unchanged.
             Stencil
@@ -636,9 +563,6 @@ Shader "CloXray/OrgInside"
         // Pass 2d: Outline (optional flat-color rim around the OrgInside silhouette)
         // Fires only at unmarked body pixels (stencil exactly = _StencilBody,
         // i.e. body region NOT marked by Pass 2c). With extruded vertices,
-        // produces a clean ring just OUTSIDE the OrgInside silhouette.
-        // _XrayOutlineWidth = 0 → no extrusion → no visible outline.
-        // ----------------------------------------------------------------
         Pass
         {
             Name "Outline"
@@ -684,8 +608,7 @@ Shader "CloXray/OrgInside"
         }
 
         // ----------------------------------------------------------------
-        // Pass 3: ShadowCaster — invisible
-        // ----------------------------------------------------------------
+        // Pass 3: ShadowCaster - invisible
         Pass
         {
             Name "ShadowCaster"

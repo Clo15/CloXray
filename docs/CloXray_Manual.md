@@ -7,7 +7,7 @@ An x-ray womb for Koikatsu CharaStudio: see a womb fill with liquid and react to
 ## TL;DR
 Add the womb → drop it into the female's vagina (leave position & rotation at default so it sits inside her) → select it and press `Shift+Alt+X` → bam, x-ray ready.
 
-That one keypress makes her body see-through over the womb, starts the liquid, and — automatically — x-rays any inserted penis and aims it straight down the canal. You don't need to select the male.
+That one keypress makes her body see-through over the womb, starts the liquid, and — automatically — x-rays any inserted penis and aims it straight down the canal. You don't need to select the partner.
 
 ---
 
@@ -21,6 +21,8 @@ That one keypress makes her body see-through over the womb, starts the liquid, a
 
 On a bottle / other item: apply the `CloXray/Liquid` shader to a liquid mesh copy, select it, press the hotkey to add wobble.
 
+**In the main game (Free-H)** there is nothing to place: start an H scene and press `Shift+Alt+W` to toggle the womb on your partner. Press it again to remove her.
+
 ---
 
 ## Features
@@ -28,7 +30,7 @@ On a bottle / other item: apply the `CloXray/Liquid` shader to a liquid mesh cop
 ### X-ray see-through
 - See the womb and the liquid inside it through the body.
 - See a penis (or an item inside the womb) through the body too.
-- One hotkey (`Shift+Alt+X`) sets it all up: the body goes see-through, the liquid wobble attaches to the selected item, and every inserted penis is x-rayed and aimed down the canal — automatically, no need to pick the male.
+- One hotkey (`Shift+Alt+X`) sets it all up: the body goes see-through, the liquid wobble attaches to the selected item, and every inserted penis is x-rayed and aimed down the canal — automatically, no need to pick the partner.
 - Re-applies itself when you swap/replace the character — no need to redo it.
 - Visual toggles: out-of-body visibility, behind-body visibility, x-ray outline, occlusion (props/clothes/walls hide it), see-up-the-canal window, see-through-clothes, skin transparency.
 
@@ -55,10 +57,19 @@ On a bottle / other item: apply the `CloXray/Liquid` shader to a liquid mesh cop
 - Hide / remove ovaries & tubes — a slider that shrinks the ovary-and-tube arms away if you don't want them on screen.
 - Reaction tuning: *BP Strength* scales how hard the womb reacts to penetration — set it to 0 to switch the auto-reaction off entirely and pose the canal yourself; *BP Dampening* sets how fast the canal closes back up after a thrust.
 
+### New in 1.1
+- **Free-H support (KK and KKS).** Toggle the womb on your H partner with `Shift+Alt+W`; the x-ray, the canal reaction and the liquid all work during normal H play. The penis is sized to the animation you are playing, from shipped measurement tables plus what it learns from your own characters, so penetration lines up even on unusual body sizes.
+- **The womb can sit anywhere on her, not just in the vagina.** Place it in the vagina and BetterPenetration drives it as a vaginal penetration; place it at the anus and BP drives it as anal; place it anywhere else and the penis entry is anchored at the womb's own canal mouth and the canal reacts to how far the tip has travelled up it. Aim the womb's canal at the penis — it is a narrow tube, and a penis that passes beside it will not open the rings.
+- **Futa supported.** A female-bodied character with a penis drives a womb exactly like a male does.
+- **Character replacement keeps the setup.** Swapping the girl carries her body uncensor, the x-ray and both penis constraints over to the new card; swapping the man carries his BP penis uncensor and re-aims him at the womb. Neither needs the hotkey afterwards.
+- **The man's own penis shader is kept.** The x-ray is added as an extra material, so custom penis shaders (KKUTS and similar) keep their look outside the body while the part inside the womb shows through.
+- **Big Studio performance pass** for scenes with several wombs, and the F1 menu is down to 13 settings.
+- Works with BetterPenetration 5.0.1.5 and 5.1 — the two BP fixes this plugin carries stand down automatically on 5.1, which has them merged upstream.
+
 ### Womb reaction to penetration
 - The canal opens with depth (entrance → cervix), widens with girth, stretches on deep thrusts, and the mouth leans toward the penis (forward/back and left/right).
 - Reacts whenever a BetterPenetration penis is inserted in the woman the womb sits on — robust to a long or BP-squished penis and to a womb placed slightly off the exact canal line (it keys off insertion into *that woman's vagina*, not just the narrow tube; a penis that isn't in that woman won't open it). Also reacts to a collider you push in (a toy/bottle carrying a DynamicBone collider); with both present, it follows whichever is deeper.
-- Works for a posed (static) penis, not just active thrusting. Withdraw the penis — or pull its tip away via a constraint/sphere on `k_f_dan_end` — and the womb closes (tunable: **F1 → WombExpand → Penis tip detach distance**).
+- Works for a posed (static) penis, not just active thrusting. Withdraw the penis — or pull its tip away via a constraint/sphere on `k_f_dan_end` — and the womb closes (the tip counts as withdrawn once it is 20cm from the womb).
 - The deep dome (top of the womb, the `Vagina_6_entrance_open` shape) is manual — open it by hand with its KKPE slider; the auto reaction drives the entrance→cervix rings (V1–V5) only.
 - Turn collider reaction off if you don't want it: globally via **BepInEx config (F1) → WombExpand → React to colliders**, or per-womb by setting the `BP_IgnoreColliders` shape (KKPE / StudioBlendShapes) above 50 — that one womb then ignores colliders and only reacts to a BP penis.
 
@@ -75,12 +86,13 @@ On a bottle / other item: apply the `CloXray/Liquid` shader to a liquid mesh cop
 - Put the liquid in any item (e.g. a bottle); a cap closes an open bottle mouth; wobble works there too. Saves with the scene.
 
 ### Controls
+- **Hotkeys** — Studio: `Shift+Alt+X` sets everything up (body x-ray, wobble, penis x-ray and aiming). Main game (Free-H): `Shift+Alt+W` toggles the womb on the H female. Both rebindable in the F1 menu, under *AutoBodyReveal → Apply Now Hotkey* and *Free-H → Toggle womb hotkey*.
 - **Material Editor** — look, fill, chamber mode, wobble setup. **KKPE / StudioBlendShapes** — the shape sliders above. **BepInEx config (F1)** — tuning, the hotkey, ranges. **Scene save/load** keeps wobble + constraints + slider values.
 
 ---
 
 ## Requirements
-Koikatsu (KK) is the primary version; the Koikatsu Sunshine (KKS) build is still in testing.
+Koikatsu (KK) and Koikatsu Sunshine (KKS) are both supported, in CharaStudio and in Free-H.
 
 Just the latest HF patch, or:
 **Required:** BepInEx + Sideloader (KK), KKAPI, MaterialEditor.
@@ -93,13 +105,15 @@ Just the latest HF patch, or:
 ## Technical details
 *(Quirks, internals, and the "why isn't X working" answers. Skip unless you're tuning or troubleshooting.)*
 
-**The hotkey (`Shift+Alt+X`, rebindable under *AutoBodyReveal → Apply Now Hotkey*) does several things in one press — automatically, for every womb in the scene:**
-1. **Body x-ray** — stamps the character each womb sits inside (within *AutoBodyReveal → Womb-in-vagina range*, default 0.15 m) so the womb shows through. Proximity-based, so it re-applies automatically on character swap. Works with or without BetterPenetration: it matches the female by the BP bone `cf_J_Vagina_root`, falling back to the vanilla `cf_j_kokan` crotch bone if no character has it (the womb item's own `cf_j_kokan` is excluded).
+**The Studio hotkey (`Shift+Alt+X`, rebindable under *AutoBodyReveal → Apply Now Hotkey*) does several things in one press — automatically, for every womb in the scene:**
+1. **Body x-ray** — stamps the character each womb sits inside (within 15cm of her vagina) so the womb shows through. Proximity-based, so it re-applies automatically on character swap. Works with or without BetterPenetration: it matches the female by the BP bone `cf_J_Vagina_root`, falling back to the vanilla `cf_j_kokan` crotch bone if no character has it (the womb item's own `cf_j_kokan` is excluded).
 2. **Wobble** — attaches the liquid-wobble effect to the **selected** item's `CloXray/Liquid` renderer.
 3. **Penis x-ray** — for each womb it finds the penetrating male automatically (the nearest `cm_m_dankon` penis that is **not** the womb's own female), and converts his `cm_m_dankon` material to `CloXray/OrgInside`, with the **stencil pair matched to that womb** so it shows through *that* body.
-4. **Penis aiming** — two `NodesConstraints` position links: `k_f_dan_entry` → the female's `cf_J_Vagina_root`, and `k_f_dan_end` → the womb's `penis_target` bone.
+4. **Penis aiming** — two `NodesConstraints` position links: `k_f_dan_end` → the womb's `penis_target` bone, and `k_f_dan_entry` → wherever that womb sits — her `cf_J_Vagina_root` for a womb in the vagina, `cf_J_Ana_Root` for one at the anus (BetterPenetration then treats the penetration as vaginal or anal accordingly), or the womb's own `clo_canal_entry` mouth for a womb placed anywhere else.
 
-**Automatic, not selection-based.** Both partners can carry a `cm_m_dankon` penis and the `k_f_dan` FK bones (KK_AdditionalFKNodes adds them to everyone), so the plugin pairs each womb with the nearest male that isn't its own female — you don't pick the male. A penis only claims a womb if its tip is within ~0.5 m of it, so in a multi-couple scene each womb wires to its own partner, and dan nodes you've already targeted by hand are left untouched.
+**In the main game there is no Studio hotkey** — press `Shift+Alt+W` (*Free-H → Toggle womb hotkey*) to spawn or remove the womb, and the same wiring is done for you. It is a separate key because another plugin's raw Alt+X check also fires on `Shift+Alt+X` there and hides the penis.
+
+**Automatic, not selection-based.** Both partners can carry a `cm_m_dankon` penis and the `k_f_dan` FK bones (KK_AdditionalFKNodes adds them to everyone), so the plugin pairs each womb with the nearest character that actually has a visible penis and is not the one wearing that womb — you don't pick the partner. A female-bodied character with a penis counts. A penis only claims a womb if its tip is within ~0.5 m of it, so in a multi-couple scene each womb wires to its own partner, and dan nodes you've already targeted by hand are left untouched.
 
 **`penis_target` is a centred aim bone.** It's a dedicated, empty leaf bone baked onto the canal centreline (nothing is skinned to it), so the penis points straight down the middle of the tube — and because it's a leaf, aiming it can never drag the womb. The womb itself stays exactly where you placed it.
 
@@ -157,13 +171,13 @@ Apply `CloXray/XrayMachine` to a plane item. At its defaults (`StencilOrgan` = 0
 
 **Control-slider blendshapes (KKPE / StudioBlendShapes).** The womb exposes per-object control shapes through **KKPE / StudioBlendShapes** — *not* Material Editor (Material Editor only surfaces shader material properties). They're real blendshape channels on the `o_uterus` mesh, so they're per-womb and save with the scene. Deform shapes: `Vagina_1_open` … `Vagina_4_upper` (canal rings, entrance→upper), `Vagina_5_entrance_open` / `Vagina_5_entrance_closed` (cervical os), `Vagina_narrowall` (whole-canal radial collapse, default 0 = canal open), `Vagina_widenall`, `Vagina_skew` (serpentine bend), `poke`, `Vagina_stretch`, `pregnant`, `mounddown` (default 50), and an **ovary-shrink / remove-ovaries** shape that contracts the ovary+tube arms (default 10; exact channel name may change). Three inert control channels are read (not deformed) by the plugin: `BP_Strength` (weight ÷ 50 → reaction gain; default 50 = 1.0×, 0 hands the womb reaction off to manual/KKPE so it won't auto-expand), `BP_Dampening` (weight ÷ 100 → ring close time in seconds; default 15 = 0.15 s), and `BP_IgnoreColliders` (default 0; set it above 50 to make THIS womb ignore pushed-in colliders — it then only reacts to a BP penis). Defaults are baked into the SMR's blendshape weights.
 
-**Smooth penis bend on load (the BetterPenetration FK fix).** BetterPenetration aims the whole penis (`cm_J_dan*`) chain every frame, but KK_AdditionalFKNodes only registers Studio FK nodes for a *subset* of the shaft bones — `cm_J_dan103/105/107` plus the foreskin `119`. On scene load Studio re-applies the scene's saved FK state, re-enabling FK on exactly those nodes, and FK (writing last) pins them straight while BP bends everything else — the kinked, "some segments stuck" bend. That's also *why* only some bones stick: only those bones *have* an FK node; the rest are always BP-driven. The manual workaround was toggling the character's FK off→on. CloXray automates the equivalent: it clears just those nodes' **per-bone FK enable** (`TargetInfo.enable`) and deactivates their guides, so BP owns the chain — without touching the rest of the body's FK (the penis nodes share the Body bone group, so a group-level toggle would disturb the whole skeleton; the fix is deliberately per-bone). A Harmony postfix on `OCIChar.ActiveFK` re-applies it every time FK is re-enabled (the load re-apply, a manual FK-panel toggle, KKPE's IK pass), so the bend can't get re-pinned. It acts only on a male with an active BP penis (`danTargetsValid`); a hand-FK-posed, non-BP penis is never touched.
+**Smooth penis bend on load (the BetterPenetration FK fix).** BetterPenetration aims the whole penis (`cm_J_dan*`) chain every frame, but KK_AdditionalFKNodes only registers Studio FK nodes for a *subset* of the shaft bones — `cm_J_dan103/105/107` plus the foreskin `119`. On scene load Studio re-applies the scene's saved FK state, re-enabling FK on exactly those nodes, and FK (writing last) pins them straight while BP bends everything else — the kinked, "some segments stuck" bend. That's also *why* only some bones stick: only those bones *have* an FK node; the rest are always BP-driven. The manual workaround was toggling the character's FK off→on. CloXray automates the equivalent: it clears just those nodes' **per-bone FK enable** (`TargetInfo.enable`) and deactivates their guides, so BP owns the chain — without touching the rest of the body's FK (the penis nodes share the Body bone group, so a group-level toggle would disturb the whole skeleton; the fix is deliberately per-bone). A Harmony postfix on `OCIChar.ActiveFK` re-applies it every time FK is re-enabled (the load re-apply, a manual FK-panel toggle, KKPE's IK pass), so the bend can't get re-pinned. It acts only on a character with an active BP penis (`danTargetsValid`); a hand-FK-posed, non-BP penis is never touched. BetterPenetration 5.1 fixes this itself, and on that version CloXray detects it and leaves the job to BP.
 
 **No duplicate `k_f_dan_end` (the BetterPenetration dan-readd fix).** BetterPenetration re-binds its dan target bones by name on every `CharacterReloaded`, *without* checking whether they already exist (it isn't Auto-Target gated), so it appends a second `k_f_dan_end` (and siblings) on each scene/character load — duplicates that pile up and break by-name lookups, the aiming constraints, and any sphere/constraint you bound to the marker. CloXray installs a Harmony prefix (`BPDanReaddGuard`) that skips the re-add when the bone is already present, so exactly one marker survives. It's installed lazily on `CharacterReloaded` (not at `Awake` — BP's Core assembly loads late, so an early hook would no-op) and is a no-op when BP isn't present.
 
 **Reaction to colliders (toys / items).** Besides a BP penis, the womb reacts to a DynamicBone collider pushed into the canal — e.g. a toy or bottle you add a KKPE collider to. It runs alongside the penis path and the womb follows whichever reaches deeper, so a toy works even with a penis also present. Tuning lives under **BepInEx config (F1) → WombExpand**:
 - **React to colliders** (default on) — the global switch; turn it off to disable collider reaction for every womb.
-- **Collider name filter** (default `Collider`) — only colliders whose GameObject name *starts with* this drive the womb. `Collider` is the name KKPE gives a collider you add, so by default the womb reacts to your collider and ignores the character's body colliders (`KK_Colliders_…`) and the penis (handled separately). Set it empty to instead auto-detect any small in-canal collider by size/position. The KKPE `[J694]`-style label is not the object name — turn on Debug Log to see the real names (the `DynamicBoneColliders` / `COLLIDER-DIAG` lines).
+- **Collider name filter** (default `Collider`) — only colliders whose GameObject name *starts with* this drive the womb. `Collider` is the name KKPE gives a collider you add, so by default the womb reacts to your collider and ignores the character's body colliders (`KK_Colliders_…`) and the penis (handled separately). Set it empty to instead auto-detect any small in-canal collider by size/position. The KKPE `[J694]`-style label is not the object name — turn on the diagnostic log (below) to see the real names (the `DynamicBoneColliders` / `COLLIDER-DIAG` lines).
 - **Collider in-canal width** (default 0.045 m) — how close the collider's tip must be to the canal axis to count as inserted (lower = stricter). **Collider pair range** / **Collider max radius** bound which colliders are considered.
 - To stop just one womb from reacting to colliders (while others still do), use the per-womb `BP_IgnoreColliders` blendshape (set > 50) instead of the global switch.
 
@@ -260,4 +274,4 @@ A manual tool, not applied by the plugin. In Material Editor: copy the target's 
 ## Credits
 Womb mesh is based on GFanon's [GF] womb mod. Tooling: BetterPenetration (Animal42069), RSkoi's wobble, xukmi's Vanilla Plus shaders, Minionsart's liquid technique. License: GPL-3.0.
 
-**Diagnostics.** Turn on *WombExpand → Debug Log* (BepInEx config, F1) for verbose per-frame logging to `BepInEx\LogOutput.log` — including a `why={…}` line that states whether the womb engaged with the penis and, if not, why (no penis in range, tip off-axis / outside the womb volume, not deep enough, withdrawn, BP_Strength = 0, etc.). The loaded plugin version is shown at startup in BepInEx's `Loading [LiquidWobbleMPB …]` line. Material-Editor debug overlays (tip pose, physics bounds) are available as toggles.
+**Diagnostics.** Turn on *General → Diagnostic log (for bug reports)* (BepInEx config, F1) to write a diagnostic log to `BepInEx\LogOutput.log`: which penis paired with which womb, the entry anchor and stencil pair chosen, the materials stamped, and any warning that is otherwise silent. It is event-driven rather than a per-frame dump, and takes effect live — turn it on, reproduce the problem, then send the log. The loaded plugin version is shown at startup in BepInEx's `Loading [LiquidWobbleMPB …]` line. Material-Editor debug overlays (tip pose, physics bounds) are available as toggles.

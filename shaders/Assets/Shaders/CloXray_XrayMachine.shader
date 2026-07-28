@@ -1,38 +1,9 @@
-// CloXray/XrayMachine — "X-ray viewing screen" plane shader.
-//
-// Apply to a plane in scene positioned in front of a character. The plane
-// acts like an x-ray viewing screen: behind the plane area you see
-//   - solid black background
-//   - silhouette outlines of characters and objects (where depth jumps)
-//   - the OUTSIDE-stencil organ rendered through in its actual color
-//     (this works because the plane is STENCIL-GATED to render only at
-//     non-organ pixels, so organ's earlier alpha-blended render survives)
-//
-// Setup:
-//   1. Add a Plane in Studio, position it in front of the character body
-//   2. Apply CloXray/XrayMachine to it
-//   3. Make sure the organ is using CloXray/Organ (or OrganDepthEdge) with
-//      Alpha = 1 (fully opaque organ render)
-//   4. Leave _StencilOrgan=0 and _StencilOrganMask=3 to catch every organ +
-//      orginside in the scene (4-slot pair scheme: bodies on multiples of 4).
-//
-// What you'll see THROUGH the plane:
-//   - Body pixels: solid black with white silhouette outlines at depth edges
-//   - Organ pixels: full-color organ (rendered earlier by CloXray/Organ, not
-//     covered by the plane thanks to stencil gating)
-//   - Background pixels: solid black with silhouette outlines
-//
-// Outside the plane's footprint, the scene renders normally.
-//
-// Properties:
-//   _BackgroundColor - "black" fill color (default pure black)
-//   _OutlineColor    - silhouette outline color
-//   _OutlineWidth    - outline width in centimeters (world space, at _RefDepth)
-//   _RefDepth        - reference depth for sample offset calc
-//   _Threshold       - depth jump in METERS for silhouette detection
-//   _StencilOrgan    - stencil value that marks organ pixels (gated to NOT
-//                      render over those, so organ shows through plane)
-//   _StencilOrganMask- AND-mask for organ comparison
+// CloXray/XrayMachine - "X-ray viewing screen" plane shader.
+// - the outside-stencil organ rendered through in its actual color
+// (this works because the plane is STENCIL-GATED to render only at
+// 1. Add a Plane in Studio, position it in front of the character body
+// 2. Apply CloXray/XrayMachine to it
+// 3. Make sure the organ is using CloXray/Organ (or OrganDepthEdge) with
 Shader "CloXray/XrayMachine"
 {
     Properties
@@ -40,29 +11,19 @@ Shader "CloXray/XrayMachine"
         [Gamma] _BackgroundColor ("Background Color", Color) = (0, 0, 0, 1)
         [Gamma] _OutlineColor ("Outline Color", Color) = (1, 1, 1, 1)
         // Outline width in cm of world space at _RefDepth. Kept adjacent to
-        // _RefDepth — they're tuned as a pair (RefDepth normalizes how much
-        // the outline scales with zoom).
         _OutlineWidth ("Outline Width (cm, 0=off)", Range(0, 20)) = 0.15
         _RefDepth ("Reference Depth (meters)", Range(0.1, 20)) = 2.0
         _Threshold ("Depth Threshold (meters)", Range(0.001, 5)) = 0.3
-        // 4-slot pair scheme — body stencils are multiples of 4:
-        //   Pair A: body=40, organ=41, orginside=42
-        //   Pair B: body=44, organ=45, orginside=46
-        //   Pair C: body=48, organ=49, orginside=50
-        // Backdrop renders where (stencil & mask) == (ref & mask) [Comp Equal].
-        // With default Ref=0, Mask=3, Comp Equal:
-        //   backdrop on stencils where low 2 bits = 0 → bodies + background.
-        //   skipped on stencils where low 2 bits != 0 → all pair organs +
-        //   orginsides simultaneously, regardless of which pair (A/B/C).
-        // To restrict to a single pair, raise the mask to include high bits, e.g.
-        //   Mask=255, Ref=41 → only pair A organ (only stencil exactly 41).
+        // Pair A: body=40, organ=41, orginside=42
+        // Pair B: body=44, organ=45, orginside=46
+        // Pair C: body=48, organ=49, orginside=50
         [IntRange] _StencilOrgan ("Stencil: Backdrop Ref (0 = bodies pass)", Range(0, 255)) = 0
         [IntRange] _StencilOrganMask ("Stencil Mask (3 = low 2 bits)", Range(0, 255)) = 3
     }
 
     SubShader
     {
-        // Queue Transparent+550 — after Organ (3500), OrgInside (3501),
+        // Queue Transparent+550 - after Organ (3500), OrgInside (3501),
         // BodyRevealCutout (3502), OutlineDepthEdge (3503), SilhouetteOutline
         // (3504). Renders late so organ alpha-blends have already happened.
         Tags { "Queue" = "Transparent+550" "RenderType" = "Transparent" "IgnoreProjector" = "True" }
@@ -79,14 +40,7 @@ Shader "CloXray/XrayMachine"
             // Render backdrop where (stencil & mask) == (ref & mask) [Comp Equal].
             // With Ref=0, Mask=3: backdrop on stencils with low 2 bits = 0
             // (bodies and background). Organs (low2=1) and orginsides (low2=2)
-            // fail the test → backdrop not drawn → the previously rendered
-            // organ pixel shows through unchanged.
-            //
             // Caveat: any other game shader that writes a stencil value with
-            // low 2 bits != 0 (e.g. some hair, eye shaders depending on KK's
-            // stencil usage) will also show through. If you see unrelated
-            // geometry leaking through the plane, raise the mask to include
-            // high bits — e.g. Mask=63, Ref=40 to restrict to the 40-47 range.
             Stencil
             {
                 Ref [_StencilOrgan]
@@ -144,7 +98,6 @@ Shader "CloXray/XrayMachine"
                                       float2(unity_CameraProjection._m00,
                                              unity_CameraProjection._m11);
 
-                // 8-direction sampling for continuous outline ring.
                 float l = SampleEyeDepth(uv + float2(-sampleOffset.x, 0));
                 float r = SampleEyeDepth(uv + float2(+sampleOffset.x, 0));
                 float u = SampleEyeDepth(uv + float2(0, +sampleOffset.y));
