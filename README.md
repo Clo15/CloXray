@@ -71,6 +71,13 @@ the standard modding workflow:
 Unity.exe -batchmode -nographics -quit -projectPath shaders -executeMethod BuildCloXray.Build
 ```
 
+## Reporting a problem
+
+Open an [issue](../../issues) with your game (KK or KKS) and what you did. If the womb does not
+react or the x-ray does not appear, a log helps a lot: turn on **F1 -> General -> Diagnostic log
+(for bug reports)**, reproduce the problem, then attach `BepInEx/LogOutput.log`. The switch is off
+by default and takes effect live - a shipped build logs nothing until you turn it on.
+
 ## License
 
 [GPL-3.0](LICENSE)
