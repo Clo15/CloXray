@@ -7,6 +7,9 @@
     <Version>1.1.0</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
+    <!-- No debug directory in the shipped DLL: it would embed this machine's obj PDB path. -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
     <RepositoryUrl></RepositoryUrl>
     <!-- Koikatsu install folder. Override for your machine:
          dotnet build -p:KKDir="D:\Games\Koikatsu"
