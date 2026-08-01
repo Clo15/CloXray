@@ -34,6 +34,24 @@ namespace LiquidWobbleMPB
         private static readonly Dictionary<Component, GameObject> _spawned = new Dictionary<Component, GameObject>();
 
         // POSE-CHANGE hook: bumped by a Harmony postfix on HSceneProc.ChangeAnimator.
+        internal static string RespawnWhy = "forced uncensor body reload";
+        internal static bool BpRefTargetMissing;   // BP DanAgent.m_referenceTarget is null - published where it is read.
+        internal static float RespawnAt;   // >0: respawn the H womb at this time (forced-uncensor body reload).
+        internal static float ReloadPendingUntil;   // a forced uncensor reload is settling until this time.
+        internal static float DeferredSpawnAt;   // >0: spawn the H womb at this time (waiting on that reload).
+        internal static float DeferredSpawnDeadline;   // loud giving-up point if the reload never reports back.
+
+        // KKAPI's CharacterReloaded does NOT fire for UncensorSelector's ReloadCharacterBody.
+        internal static Component DeferredSpawnFemale;
+        internal static void NotifyReloadComplete() { }
+
+        internal static bool BpBodyReady(Component female)
+        {
+            if (female == null) return false;
+            foreach (var tr in female.GetComponentsInChildren<Transform>(true))
+                if (tr != null && tr.name.StartsWith("cf_J_Vagina", System.StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
         private static int _poseVersion;
         public static int PoseVersion { get { return _poseVersion; } }
         private static bool _poseHookTried;
@@ -492,7 +510,7 @@ namespace LiquidWobbleMPB
                 + " Nudge restored to pre-loop " + nudge0.ToString("F1") + "mm. Toggle Shift+Alt+B while she is IDLE (no pose change, no penetration) to re-run.");
             RebindNudgeMM = nudge0;
             _autoHaveTarget = false;   // also makes the respawn's AutoVerify exit immediately (bounded).
-            if (!HPenetrated && AnySpawned()) { _autoImmediate = true; Toggle(host); Toggle(host); }
+            if (!HPenetrated && AnySpawned()) { _autoImmediate = true; ToggleWhy = "auto-parity"; Toggle(host); ToggleWhy = "auto-parity"; Toggle(host); }
         }
 
         private static void ShowWomb(GameObject womb)
@@ -526,7 +544,7 @@ namespace LiquidWobbleMPB
             }
             if (womb == null || female == null) { ShowWomb(womb); yield break; }
             RebindNudgeMM = nudge; NudgeVerified = true; _nudgeFemale = female;   // cache -> repeat spawns snap.
-            Toggle(host); Toggle(host);   // one respawn -> NudgeVerified snap path bakes the predicted nudge (no loop).
+            ToggleWhy = "nudge-bake"; Toggle(host); ToggleWhy = "nudge-bake"; Toggle(host);   // one respawn -> NudgeVerified snap path bakes the predicted nudge (no loop).
             LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: PLACED via analytic prediction (one-shot, no loop) — nudge " + RebindNudgeMM.ToString("F1") + "mm, cached for this girl.");
         }
 
@@ -578,8 +596,8 @@ namespace LiquidWobbleMPB
                 + (_autoTargetLocal * 1000f).ToString("F1") + "mm) — switching to a fresh REBIND spawn.");
             _autoIter = 0;
             _autoImmediate = true;
-            Toggle(host);   // remove the mirror womb.
-            Toggle(host);   // fresh spawn -> immediate rebind (current nudge) -> AutoVerify measures + corrects.
+            ToggleWhy = "rebind-respawn"; Toggle(host);   // remove the mirror womb.
+            ToggleWhy = "rebind-respawn"; Toggle(host);   // fresh spawn -> immediate rebind (current nudge) -> AutoVerify measures + corrects.
         }
 
         private static IEnumerator AutoVerify(MonoBehaviour host, Component female, GameObject womb)
@@ -645,8 +663,12 @@ namespace LiquidWobbleMPB
             Toggle(host);
         }
 
+        internal static string ToggleWhy = "hotkey";   // set by the caller so the log says who toggled.
         public static void Toggle(MonoBehaviour host)
         {
+            string why = ToggleWhy; ToggleWhy = "hotkey";
+            LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: Toggle(" + why + ") — womb currently "
+                + (AnySpawned() ? "SPAWNED" : "absent") + ".");
             // prune stale entries (H scene ended, character destroyed).
             var dead = new List<Component>();
             foreach (var kv in _spawned) if (kv.Key == null || kv.Value == null) dead.Add(kv.Key);
@@ -664,8 +686,35 @@ namespace LiquidWobbleMPB
             {
                 UnityEngine.Object.Destroy(existing);
                 _spawned.Remove(female);
+                // after the map entry is gone: RemoveForWomb asks AnySpawned whether any womb is still set
+                // up before it touches the male, and this one must not count itself.
+                try { AutoBodyReveal.RemoveForWomb(female); }
+                catch (Exception rex) { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: x-ray cleanup threw on womb removal — continuing: " + rex.Message); }
                 LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: womb removed from '" + female.name + "'.");
                 return;
+            }
+
+            // BP UNCENSOR first.
+            if (!IsStudio)
+            {
+                ReloadPendingUntil = 0f;
+                // HER BODY first, ALONE.
+                TryForceBPUncensor(female, 2);
+                if (ReloadPendingUntil <= Time.unscaledTime)
+                {
+                    Component male0 = FindNearestMaleWithPenis(female.transform.position, 2f, female);
+                    if (male0 != null) { TryForceBPUncensor(male0, 0); TryForceBPUncensor(male0, 1); }
+                }
+                if (ReloadPendingUntil > Time.unscaledTime)
+                {
+                    // Far out on purpose: NotifyReloadComplete pulls it in the moment KKAPI reports the
+                    // reload finished.
+                    DeferredSpawnFemale = female;
+                    DeferredSpawnAt = Time.unscaledTime + 0.1f;   // first poll almost immediately.
+                    DeferredSpawnDeadline = Time.unscaledTime + 8f;   // loud giving-up point.
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: BP uncensor forced first — spawning the womb once the body reload finishes.");
+                    return;
+                }
             }
 
             GameObject prefab = null;
@@ -749,7 +798,7 @@ namespace LiquidWobbleMPB
         }
 
         // The female to toggle: nearest female ChaControl to the camera (in H that is the heroine on screen).
-        private static Component FindTargetFemale()
+        internal static Component FindTargetFemale()
         {
             Vector3 eye = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
             Component best = null; float bestSq = float.MaxValue;
@@ -818,7 +867,15 @@ namespace LiquidWobbleMPB
         public static void ReattachPenisAim()
         {
             if (_sWomb != null && _sFemale != null) AttachPenisAim(_sWomb, _sMale, _sFemale);
+            if (!IsStudio && HPenetrated && BpRefTargetMissing && _sMale != null && _sFemale != null)
+            {
+                bool ok = BPBridge.RebindCollisionAgent(_sMale, _sFemale, true, false);
+                LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: BP had NO collision target while penetrated — re-bound '"
+                    + _sMale.name + "' to '" + _sFemale.name + "': " + (ok ? "OK" : "FAILED"));
+            }
             if (_sWomb != null && _sMale != null) AutoBodyReveal.ReapplyMainGamePenisXray(_sWomb, _sMale);
+            // HER body reload wipes the body/veil/clothes copies the same way.
+            if (_sWomb != null && _sFemale != null) AutoBodyReveal.ReapplyMainGameBodyXray(_sWomb, _sFemale);
         }
 
         private static readonly HashSet<string> _uncForced = new HashSet<string>();
@@ -831,7 +888,6 @@ namespace LiquidWobbleMPB
         private static readonly string[] _uncCfgName   = { "DefaultMalePenis", "DefaultMaleBalls", "DefaultFemaleBody" };
         private static readonly string[] _uncPartLabel = { "penis", "balls", "body" };
         // selection).
-        private static readonly string[] _uncReloadName = { "ReloadCharacterPenis", "ReloadCharacterBalls", "ReloadCharacterBody" };
         private static readonly object[] _uncEntry = new object[3];
         private static readonly string[] _uncSaved = new string[3];
         private static readonly bool[] _uncCfgForced = new bool[3];
@@ -912,12 +968,18 @@ namespace LiquidWobbleMPB
                     all.Add(dn);
                     if (dn.IndexOf("BP", StringComparison.OrdinalIgnoreCase) < 0) continue;
                     if (kind == 2 && sexOf(e.Value) == 0) continue;   // female body: skip male-sex bodies.
-                    bool pref = kind == 0 && dn.IndexOf("SOS", StringComparison.OrdinalIgnoreCase) >= 0;
+                    // kind 1 (balls): prefer a COLOR MATCH variant.
+                    bool pref = (kind == 0 && dn.IndexOf("SOS", StringComparison.OrdinalIgnoreCase) >= 0)
+                             || (kind == 1 && dn.IndexOf("COLOR MATCH", StringComparison.OrdinalIgnoreCase) >= 0);
                     bool better = bestName == null
                         || (pref && !bestPreferred)
                         || (pref == bestPreferred && string.CompareOrdinal(dn, bestName) < 0);
                     if (better) { bestName = dn; bestGuid = e.Key as string; bestPreferred = pref; }
                 }
+                // Log every candidate: the zipmod FILE names ("[KKS][Balls][BP] Color Match.zipmod") are not
+                // what UncensorSelector reports as the display name, so picking by guessed substrings silently lands on the wrong variant (the white-balls report).
+                LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: " + part + " uncensor candidates: "
+                    + string.Join(" | ", all.ToArray()) + "  -> picked '" + (bestName ?? "none") + "'.");
                 if (bestName == null)
                 {
                     LiquidWobbleMPBPlugin._logger?.LogError("CloXray: no installed " + part + " uncensor with 'BP' in its name — install BetterPenetration's uncensor zipmods. Installed: " + string.Join(" | ", all.ToArray()));
@@ -936,20 +998,23 @@ namespace LiquidWobbleMPB
                     pGuid.SetValue(ctl, bestGuid, null);
                     LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: '" + cha.name + "' " + part + " uncensor was " + curName + " (not BP-driven) — SET to '" + bestName + "' for this H session (womb spawn = consent; the card file is untouched).");
                 }
+                // ONE public call.
                 var mUpd = tc.GetMethod("UpdateUncensor", BI);
-                if (mUpd != null) mUpd.Invoke(ctl, null);
-                // does not.
-                var mReload = tc.GetMethod(_uncReloadName[kind], BI);
-                if (mReload != null)
+                if (mUpd == null)
                 {
-                    try
-                    {
-                        mReload.Invoke(ctl, null);
-                        LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: " + _uncReloadName[kind] + "() invoked on '" + cha.name + "' — the " + part + " mesh (and its BP bones) is reloading.");
-                    }
-                    catch (Exception re) { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: " + _uncReloadName[kind] + "() failed on '" + cha.name + "': " + re.Message + " — the BP " + part + " uncensor may not have applied."); }
+                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: UncensorSelector controller has no public UpdateUncensor() — cannot apply the BP " + part + " uncensor.");
+                    return;
                 }
-                else LiquidWobbleMPBPlugin._logger?.LogError("CloXray: UncensorSelector controller has no '" + _uncReloadName[kind] + "' — cannot force the mesh reload; the BP " + part + " uncensor will only apply on the next natural body reload.");
+                try
+                {
+                    mUpd.Invoke(ctl, null);
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: UpdateUncensor() invoked on '" + cha.name + "' — " + part
+                        + " mesh + skin pass reloading (async).");
+                    if (!IsStudio) ReloadPendingUntil = Time.unscaledTime + 1.5f;
+                    // Already-spawned womb (a later force, e.g.
+                    if (kind == 2 && !IsStudio && AnySpawned()) RespawnAt = Time.unscaledTime + 1.5f;
+                }
+                catch (Exception re) { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: UpdateUncensor() failed on '" + cha.name + "': " + re.Message + " — the BP " + part + " uncensor may not have applied."); }
                 LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: '" + cha.name + "' " + part + " re-resolving as '" + bestName + "'. Body reloads; BP re-inits; the agent watchdog re-binds within 2s.");
             }
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: BP " + part + " uncensor force failed: " + e.GetType().Name + ": " + e.Message); }
@@ -1425,6 +1490,7 @@ namespace LiquidWobbleMPB
         private object _agent;
         private System.Reflection.FieldInfo _fInner;
         private Transform _target, _original, _backRef, _proxy, _entrance, _danBase;
+        private const string ProxyName = "CloXray_PinProxy";
         private float _danLen;
         private float _follow;   // displace-ride (m): how far the pin follows the yielding dome.
         private float _minD = float.MaxValue, _maxD;   // thrust envelope: running base->pin distance extremes.
@@ -1730,6 +1796,7 @@ namespace LiquidWobbleMPB
             try
             {
                 var rt = _fRefTarget != null ? _fRefTarget.GetValue(_danAgent) as Transform : null;
+                MainGameWomb.BpRefTargetMissing = (rt == null);   // the signal the real failure showed: refTarget='-'.
                 if (rt == null) return false;
                 refW = rt.position;
                 if (_miGetDanStart != null && _danPointsObj != null) baseW = (Vector3)_miGetDanStart.Invoke(_danPointsObj, null);
@@ -1772,12 +1839,14 @@ namespace LiquidWobbleMPB
             {
                 // The actual pin point: penis_target shifted along the female's backward direction by the
                 // live config offset.
-                var go = new GameObject("CloXray_PinProxy");
+                var go = new GameObject(ProxyName);
                 _proxy = go.transform;
                 _proxy.SetParent(transform, false);
             }
             UpdateProxy();
-            _original = _fInner.GetValue(_agent) as Transform;
+            // never capture its own proxy as "the original": a re-attach (agent watchdog, respawn) finds.
+            var cur = _fInner.GetValue(_agent) as Transform;
+            if (cur == null || cur.name != ProxyName) _original = cur;
             _fInner.SetValue(_agent, _proxy);
             LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: BP m_innerTarget pinned: '" + (_original != null ? _original.name : "null") + "' -> penis_target + back-offset (penis end constrained at the womb).");
             try
@@ -2148,8 +2217,24 @@ namespace LiquidWobbleMPB
                     bool pen = false; string rn = "-";
                     try { var f = _danAgent.GetType().GetField("m_danPenetration", BF); if (f != null) pen = (bool)f.GetValue(_danAgent); } catch { }
                     try { var f = _danAgent.GetType().GetField("m_referenceTarget", BF); var rt = f != null ? f.GetValue(_danAgent) as Transform : null; if (rt != null) rn = rt.name; } catch { }
-                    string sig = pen + "/" + rn;
-                    if (sig != _lastPenPath) { _lastPenPath = sig; LiquidWobbleMPBPlugin._logger?.LogInfo("  BP-PATH danPenetration=" + pen + " refTarget='" + rn + "' motion='" + MainGameWomb.HMotion + "' (pin " + (pen && rn != "-" ? "HONORED" : "DROPPED — dan reset path") + ")."); }
+                    // AIM GEOMETRY too: a persistent mistarget shows up as a large tip<->pin gap, or as a
+                    // pin sitting far from the womb's own penis_target.
+                    string aim = "-";
+                    try
+                    {
+                        // BP's own end marker is what it drives; compare it against where it pin.
+                        Transform tip = null;
+                        try { var ft = _danAgent.GetType().GetField("m_danEnd", BF); tip = ft != null ? ft.GetValue(_danAgent) as Transform : null; } catch { }
+                        Vector3 pinW = _proxy != null ? _proxy.position : Vector3.zero;
+                        Vector3 tgtW = _target != null ? _target.position : Vector3.zero;
+                        float tipGap = (tip != null && _proxy != null) ? Vector3.Distance(tip.position, pinW) * 1000f : -1f;
+                        float pinOff = (_proxy != null && _target != null) ? Vector3.Distance(pinW, tgtW) * 1000f : -1f;
+                        aim = "tipToPin=" + tipGap.ToString("F0") + "mm pinToTarget=" + pinOff.ToString("F0")
+                            + "mm target='" + (_target != null ? _target.name : "NULL") + "'";
+                    }
+                    catch { }
+                    string sig = pen + "/" + rn + "/" + aim;
+                    if (sig != _lastPenPath) { _lastPenPath = sig; LiquidWobbleMPBPlugin._logger?.LogInfo("  BP-PATH danPenetration=" + pen + " refTarget='" + rn + "' motion='" + MainGameWomb.HMotion + "' " + aim + " (pin " + (pen && rn != "-" ? "HONORED" : "DROPPED — dan reset path") + ")."); }
                 }
 
                 // DAN-OPTIONS GUARD (2s): BP rebuilds/rewrites m_danOptions from ITS config on setting
@@ -2176,6 +2261,26 @@ namespace LiquidWobbleMPB
             }
             catch { }
         }
+        // BP's own reset entry points on DanAgent (same type as SetDanTarget).
+        private void HandDanBackToBP()
+        {
+            if (_danAgent == null) return;
+            foreach (var name in new[] { "ResetDanAdjustment" })   // ClearDanTarget has no parameterless overload; this alone hands it back.
+            {
+                var mi = _danAgent.GetType().GetMethod(name,
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic,
+                    null, System.Type.EmptyTypes, null);
+                if (mi == null)
+                {
+                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: BetterPenetration has no parameterless DanAgent." + name
+                        + " — cannot hand the penis back; it will keep its last bend until BP re-targets.");
+                    continue;
+                }
+                try { mi.Invoke(_danAgent, null); LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: BP DanAgent." + name + "() — penis handed back to BetterPenetration."); }
+                catch (System.Exception e) { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: BP DanAgent." + name + "() threw: " + e.Message); }
+            }
+        }
+
         private bool _lastBpHealth = true;
         private string _lastPenPath = "";
 
@@ -2194,11 +2299,15 @@ namespace LiquidWobbleMPB
                     _fKokanPush.SetValue(_colOpts, _hadKokanPush);
                     LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: BP kokan push/pull restored to " + _hadKokanPush + ".");
                 }
-                if (_agent != null && _fInner != null && ReferenceEquals(_fInner.GetValue(_agent), _proxy) && _original != null)
+                if (_agent != null && _fInner != null && ReferenceEquals(_fInner.GetValue(_agent), _proxy) && _original != null
+                    && _original.name != ProxyName)
                 {
                     _fInner.SetValue(_agent, _original);
                     LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: BP m_innerTarget restored to '" + _original.name + "'.");
                 }
+                // HAND THE PENIS BACK TO BP. Restoring the fields above stops it driving it, but BP only
+                // writes the dan bones while it is adjusting.
+                HandDanBackToBP();
                 MainGameWomb.RestoreBPSimplifyConfig();
                 MainGameWomb.RestoreBPUncensorDefaults();
             }
@@ -2355,14 +2464,15 @@ namespace LiquidWobbleMPB
 
         // ── Fill: F1 config base + finish bursts (ME has no H-scene UI) ───────────────── Each
         // inside-finish (the cum button) raises a burst accumulator by 'Fill on finish', eased in over a few seconds on top of the base slider.
-        private float _burst;   // the finish-cum fill level (over the config base), driven by the state machine below.
+        internal static Component s_cumOwner;
+        private static float _burst;   // the finish-cum fill level (over the config base), driven by the state machine below.
         // ejaculation animation (prolonged, spurty), then eases back to a lower SETTLE level as sex
         // continues.
-        private int _cumShot;
-        private float _cumFrom, _cumPeak, _cumSettle;   // fill level at shot start, this shot's peak, its settle.
-        private float _cumPhaseT;   // seconds since this shot fired (rise starts after CumDelay).
-        private int _cumPhase;   // 0 hold-settle, 1 rising, 2 settling.
-        private float _domeTarget;   // wombbig/ovary_shrink weight (0..100), grows on shots past full.
+        private static int _cumShot;
+        private static float _cumFrom, _cumPeak, _cumSettle;   // fill level at shot start, this shot's peak, its settle.
+        private static float _cumPhaseT;   // seconds since this shot fired (rise starts after CumDelay).
+        private static int _cumPhase;   // 0 hold-settle, 1 rising, 2 settling.
+        private static float _domeTarget;   // wombbig/ovary_shrink weight (0..100), grows on shots past full.
         private const float CumDelay = 0.6f, CumRiseDur = 4.0f, CumSettleDur = 8.0f;
         private SkinnedMeshRenderer _domeSmr; private int _wombBigIdx = -2, _ovaryShrinkIdx = -2;
 
@@ -2413,6 +2523,17 @@ namespace LiquidWobbleMPB
         // Advance the finish-cum fill (called every frame from PushFill).
         private void UpdateCumFill()
         {
+            // A different girl starts clean; the same girl keeps what she has through any respawn.
+            Component owner = MainGameWomb.FindTargetFemale();
+            if (owner != null && !ReferenceEquals(owner, s_cumOwner))
+            {
+                if (s_cumOwner != null)
+                {
+                    _burst = 0f; _cumShot = 0; _cumPhase = 0; _cumPhaseT = 0f; _domeTarget = 0f;
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: cum state reset — different H female.");
+                }
+                s_cumOwner = owner;
+            }
             if (_cumShot <= 0) return;
             _cumPhaseT += Time.deltaTime;
             if (_cumPhase == 1)

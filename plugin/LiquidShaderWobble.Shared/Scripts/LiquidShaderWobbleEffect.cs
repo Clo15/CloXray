@@ -70,7 +70,7 @@ namespace LiquidWobbleMPB
         // Half the 3mm CUM_CHAMBER_GAP (build CUM_CHAMBER_GAP): the rest-Y midpoint of the gap between.
         private const float ChamberSplitBias = 0.0015f;
         // DIAGNOSTIC build stamp - bump every plugin build so the log proves which DLL is live.
-        public const int PluginBuild = 822;   // build stamp - bump every build.
+        public const int PluginBuild = 860;   // build stamp - bump every build.
         // 0 = measure the chamber extents every frame (dirty-gated).
         public float ExtentPeriod { get; set; } = 0f;
 

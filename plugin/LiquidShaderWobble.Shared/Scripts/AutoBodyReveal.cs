@@ -14,6 +14,7 @@ namespace LiquidWobbleMPB
         public const string BodyVeilShader   = "CloXray/BodyRevealExtra";
         public const string OrgInsideShader  = "CloXray/OrgInside";   // applied to a male penis material so it x-rays through the body.
         private const string PenisMat        = "cm_m_dankon";   // the male penis material name.
+        private const string BallsMat        = "cm_m_dan_f";   // the male balls material (o_dan_f).
         private const int   BodyVeilQueue    = 3504;   // after the whole womb stack (organ 3500, interior 3502, cum 3503).
 
         private static bool _tried;
@@ -274,6 +275,83 @@ namespace LiquidWobbleMPB
         }
 
         // A FRESH (not-yet-configured) ME copy: name matches, but no CloXray shader assigned yet.
+        internal static int RemoveXrayCopies(Component cc, bool debug)
+        {
+            Init();   // same lazy resolve the Ensure* apply paths do.
+            // _ctrlType null -> GetComponent((Type)null) THROWS, and this runs inside the toggle-off of the
+            // nudge-bake respawn coroutine.
+            if (cc == null || _ctrlType == null || _mCopyRemove == null)
+            {
+                LiquidWobbleMPBPlugin._logger?.LogError("CloXray: cannot remove the x-ray copies from '"
+                    + (cc != null ? cc.name : "?") + "' — MaterialEditor is not resolved (type="
+                    + (_ctrlType != null) + ", copyRemove=" + (_mCopyRemove != null) + "). Nothing removed.");
+                return 0;
+            }
+            var me = cc.GetComponent(_ctrlType);
+            if (me == null)
+            {
+                LiquidWobbleMPBPlugin._logger?.LogError("CloXray: cannot remove the x-ray copies from '"
+                    + (cc != null ? cc.name : "?") + "' — MaterialEditor's MaterialCopyRemove is unavailable. Nothing removed.");
+                return 0;
+            }
+            int removed = 0;
+            // CLOTHES first. ME addresses a garment by its slot index + the Clothing object type; giving it
+            // the Character type (as the body/penis pass does) makes it look in the wrong list and drop nothing.
+            if (_otClothing != null)
+            {
+                GameObject[] slots = null;
+                const BindingFlags ANY2 = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                var fC2 = cc.GetType().GetField("objClothes", ANY2);
+                if (fC2 != null) slots = fC2.GetValue(cc) as GameObject[];
+                if (slots == null)
+                {
+                    var pC2 = cc.GetType().GetProperty("objClothes", ANY2);
+                    if (pC2 != null) slots = pC2.GetValue(cc, null) as GameObject[];
+                }
+                if (slots != null)
+                    foreach (int kind in ClothesKinds)
+                    {
+                        if (kind >= slots.Length || slots[kind] == null) continue;
+                        foreach (var r in slots[kind].GetComponentsInChildren<Renderer>(true))
+                            removed += RemoveCopiesOn(me, r, kind, _otClothing, slots[kind], cc.name);
+                    }
+            }
+            foreach (var r in cc.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                removed += RemoveCopiesOn(me, r, 0, _otCharacter, GetBodyGo(cc) ?? (r != null ? r.gameObject : null), cc.name);
+            }
+            if (debug || removed > 0)
+                LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: removed " + removed + " x-ray copy/copies from '" + cc.name + "'.");
+            return removed;
+        }
+
+        // Hand ME the COPY itself: MaterialCopyRemove branches on the name it is given.
+        private static int RemoveCopiesOn(object me, Renderer r, int slot, object objType, GameObject go, string who)
+        {
+            if (r == null || r.sharedMaterials == null || go == null) return 0;
+            var copies = new System.Collections.Generic.List<Material>();
+            foreach (var m in r.sharedMaterials)
+                if (m != null && m.shader != null && m.shader.name.StartsWith("CloXray/")
+                    && BaseName(m).Contains(".MECopy")) copies.Add(m);
+            int n = 0;
+            foreach (var copy in copies)
+            {
+                int before = RowCount(me);
+                _mCopyRemove.Invoke(me, new object[] { slot, objType, copy, go });
+                if (RowCount(me) >= before)
+                {
+                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: MaterialEditor did not drop the copy row for '"
+                        + copy.name + "' on '" + who + "' — leaving the rest in place.");
+                    break;
+                }
+                n++;
+            }
+            return n;
+        }
+
+        private static int RowCount(object me)
+        { var rows = CopyRows(me); return rows == null ? -1 : rows.Count; }
+
         private static Material FindCopy(SkinnedMeshRenderer r, string srcName)
         {
             foreach (var m in r.sharedMaterials)
@@ -344,6 +422,46 @@ namespace LiquidWobbleMPB
 
         /// Convert a SELECTED male's penis material (cm_m_dankon) to CloXray/OrgInside with
         /// OutsideOfBodyAlpha=1 so the penis x-rays through the body (the "apply OrgInside to a penis" case).
+        internal static bool EnsureBallsOrgInside(Component cc, int stencil, bool debug)
+        {
+            Init();
+            if (cc == null || _ctrlType == null || _mSetShader == null || _mSetFloat == null) return false;
+            try
+            {
+                var me = cc.GetComponent(_ctrlType);
+                if (me == null) return false;
+                SkinnedMeshRenderer ballsR = null; Material src = null;
+                foreach (var r in cc.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+                {
+                    if (r == null || r.sharedMaterials == null) continue;
+                    foreach (var m in r.sharedMaterials)
+                        if (m != null && BaseName(m) == BallsMat) { ballsR = r; src = m; break; }
+                    if (src != null) break;
+                }
+                if (src == null) { if (debug) LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: no '" + BallsMat + "' on '" + cc.name + "' — balls x-ray skipped."); return false; }
+
+                GameObject go = GetBodyGo(cc) ?? ballsR.gameObject;
+                Material copy = null;
+                foreach (var m in ballsR.sharedMaterials)
+                    if (m != null && m.shader != null && m.shader.name == OrgInsideShader && m.name.Contains(".MECopy")) { copy = m; break; }
+                if (copy == null) copy = CreateCopyTracked(me, ballsR, src, go, "balls x-ray");
+                if (copy == null) return false;
+
+                _mSetShader.Invoke(me, new object[] { 0, _otCharacter, copy, OrgInsideShader, go, true });
+                _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "StencilBody",        (float)stencil,       go, true });
+                _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "StencilBody_Plus_1", (float)(stencil + 1), go, true });
+                _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "OutsideOfBodyAlpha", 0f,                   go, true });
+                _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "OutsideShieldDepth", 1f,                   go, true });
+                LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: balls x-ray on '" + cc.name + "' — '" + copy.name + "' -> CloXray/OrgInside (stencil " + stencil + "/" + (stencil + 1) + ").");
+                return true;
+            }
+            catch (System.Exception e)
+            {
+                LiquidWobbleMPBPlugin._logger?.LogError("MEBridge: balls x-ray failed on '" + (cc ? cc.name : "?") + "': " + e.Message);
+                return false;
+            }
+        }
+
         public static bool EnsurePenisOrgInside(Component cc, int stencil, bool debug)
         {
             return EnsurePenisOrgInside(cc, stencil, debug, 1f, -1f);   // Studio defaults: outside visible, BottomWindow untouched (ME owns it there).
@@ -475,6 +593,21 @@ namespace LiquidWobbleMPB
                         if (penisR != null) break;
                     }
                 dump("MALE penis", penisR);
+                // every renderer+material on the male, one line each: the balls material is not named "tama"
+                // on this rig, so the white-balls report needs the real names before it can be diagnosed.
+                if (male != null)
+                    foreach (var r in male.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+                    {
+                        if (r == null || r.sharedMaterials == null || r.sharedMaterials.Length == 0) continue;
+                        sb.AppendLine().Append("  MALE rend '").Append(r.name).Append("' enabled=").Append(r.enabled);
+                        foreach (var m in r.sharedMaterials)
+                        {
+                            if (m == null) { sb.AppendLine().Append("      <null>"); continue; }
+                            sb.AppendLine().Append("      '").Append(m.name).Append("' sh=").Append(m.shader != null ? m.shader.name : "NULL")
+                              .Append(" tex=").Append(m.HasProperty("_MainTex") ? (m.GetTexture("_MainTex") != null ? "yes" : "NULL") : "-")
+                              .Append(" col=").Append(m.HasProperty("_Color") ? m.GetColor("_Color").ToString("F2") : "-");
+                        }
+                    }
                 Renderer bodyR = null;
                 if (female != null)
                     foreach (var r in female.GetComponentsInChildren<Renderer>(true))
@@ -1640,6 +1773,8 @@ namespace LiquidWobbleMPB
             // both event-driven.
             WombExpandEffect.InvalidateVaginaRoots();
             WombExpandEffect.RequestRepair();
+            // A womb spawn deferred behind the forced uncensor reload waits.
+            MainGameWomb.NotifyReloadComplete();
             // The BP-interop hooks are CloXray-womb-scoped: install them only while a womb is in the scene,
             // so a no-CloXray scene is never patched.
             if (WombExpandEffect.AnyActive) InstallWombHooks();
@@ -1851,11 +1986,11 @@ namespace LiquidWobbleMPB
             WobbleSceneController.DeferBpRebind(w, cc);   // BP cleared her collision agent on the body reload.
         }
 
-        // Where the penis entry is pinned on the receiver: whichever of her BP entry bones the womb
-        // actually sits in.
+        // Where the penis entry is pinned on the receiver: whichever of her BP entry bones the womb actually
+        // sits.
         private static readonly string[] BpEntryAnchors = { VaginaBone, "cf_J_Ana_Root" };
         private static readonly string[] VanillaEntryAnchors = { "k_f_ana_00", "cf_j_ana", FallbackBone };
-        // A bone of HERS by that name - never one belonging to a womb item parented under her.
+        // A bone of HERS by that name - never one belonging to a womb item parented under.
         private static Transform HerBone(Component receiver, string name)
         {
             foreach (var tr in receiver.GetComponentsInChildren<Transform>(true))
@@ -1893,7 +2028,7 @@ namespace LiquidWobbleMPB
                 return kv.Value;
             }
 
-            // Anywhere else: the womb's own canal mouth, so the penis enters the womb where it sits.
+            // Anywhere else: the womb's own canal mouth, so the penis enters the womb where it actually.
             Transform canal = w.CanalEntryBone;
             if (canal != null)
             {
@@ -2042,6 +2177,16 @@ namespace LiquidWobbleMPB
 
         // MAIN-GAME direct path: the womb was spawned ON a known character, so skip the proximity search
         // entirely.
+        public static void RemoveForWomb(Component receiver)
+        {
+            if (MainGameWomb.IsStudio || receiver == null) return;
+            MEBridge.RemoveXrayCopies(receiver, Debug);
+            // Her partner's penis copy only goes if no other womb is left in the scene.
+            if (MainGameWomb.AnySpawned()) return;
+            Component male = MainGameWomb.FindNearestMaleWithPenis(receiver.transform.position, 2f, receiver);
+            if (male != null) MEBridge.RemoveXrayCopies(male, Debug);
+        }
+
         public static void ApplyForWomb(WombExpandEffect w, Component cc)
         {
             if (!LiquidWobbleMPBPlugin.CfgEnabled || w == null || cc == null) return;
@@ -2065,6 +2210,8 @@ namespace LiquidWobbleMPB
                 {
                     MEBridge.EnsurePenisOrgInside(male, st, Debug, LiquidWobbleMPBPlugin.CfgHPenisOutside,
                                                   LiquidWobbleMPBPlugin.CfgHPenisBottomWindow ? 1f : 0f);
+            MEBridge.EnsureBallsOrgInside(male, st, Debug);   // the shaft/balls junction, or it reads white in the window.
+                    MEBridge.EnsureBallsOrgInside(male, st, Debug);   // the shaft/balls junction, or it reads white in the window.
                     MainGameWomb.AttachPenisAim(w, male, cc);   // pin BP's inner limit at the womb's penis_target.
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: main-game penis x-ray on '" + male.name + "' (stencil " + st + ").");
                     if (Debug) MEBridge.DumpXrayChain(male, cc, w);
@@ -2080,8 +2227,28 @@ namespace LiquidWobbleMPB
             int st = w.OrganStencil();
             MEBridge.EnsurePenisOrgInside(male, st, Debug, LiquidWobbleMPBPlugin.CfgHPenisOutside,
                                           LiquidWobbleMPBPlugin.CfgHPenisBottomWindow ? 1f : 0f);
+            MEBridge.EnsureBallsOrgInside(male, st, Debug);   // the shaft/balls junction, or it reads white in the window.
             LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: penis x-ray RE-APPLIED on '" + male.name + "' after a body reload (stencil " + st + ") — the reload wiped the instanced copies.");
             if (Debug) MEBridge.DumpXrayChain(male, null, w);
+        }
+
+        // Same story for HER body. The BP5 body-uncensor force reloads the body mesh, which wipes the
+        // instanced cf_m_body .MECopy x-ray materials.
+        public static void ReapplyMainGameBodyXray(WombExpandEffect w, Component female)
+        {
+            if (w == null || female == null || MainGameWomb.IsStudio) return;
+            if (!LiquidWobbleMPBPlugin.CfgEnabled) return;
+            int st = w.OrganStencil();
+            if (MEBridge.EnsureBodyReveal(female, st, Debug, true))
+                w.OnBodyRevealApplied();
+            if (LiquidWobbleMPBPlugin.CfgBodyVeil) MEBridge.EnsureBodyVeil(female, st + 1, Debug, true);
+            if (LiquidWobbleMPBPlugin.CfgClothesReveal)
+            {
+                MEBridge.EnsureClothesReveal(female, st, Debug);
+                MEBridge.EnsureAccessoryReveal(female, st, Debug);
+            }
+            LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: body x-ray RE-APPLIED on '" + female.name
+                + "' after a body reload (stencil " + st + ") — the reload wiped the instanced copies.");
         }
 
         public static void AttachWobbleTo(GameObject go)

@@ -13,12 +13,12 @@ namespace LiquidWobbleMPB
     {
         public const string Guid = "Clo.LiquidWobbleMPB";
         public const string Name = "LiquidWobbleMPB";
-        public const string Version = "1.1.0";
+        public const string Version = "1.1.1";
 
         // The gated view of the log sink: null = silent, and every `_logger?.LogX(...)` in the plugin is a
         // no-op.
         internal static ManualLogSource _logger;
-        private static ManualLogSource _log;   // the real sink, handed out only while logging is on.
+        private static ManualLogSource _log;   // the real sink, handed out only when logging.
 
         private const string AxisBone = "cf_j_kokan";
 
@@ -123,8 +123,8 @@ namespace LiquidWobbleMPB
             _cfgEnabled = Config.Bind("General", "Enabled", true,
                 "Master switch for the whole mod (ON by default). OFF = the plugin stops driving and stops reaching into the scene: wombs freeze (canal/liquid stop updating), no x-ray auto-apply on character load, and BetterPenetration + the penis FK are left exactly as you posed them. Takes effect live — no scene reload needed.");
 
-            // Deliberately not the old "WombExpand / Debug Log" key: an existing config holding true for
-            // that dead setting must not switch this one on.
+            // A NEW key on purpose: 1.0 shipped a "WombExpand / Debug Log" that did nothing (the sink was
+            // nulled unconditionally), so reusing it would switch the full log on for anyone whose old config happens to hold true.
             _cfgDebugLog = Config.Bind("General", "Diagnostic log (for bug reports)", false,
                 "Writes what the plugin is doing to BepInEx/LogOutput.log: which penis it paired with which womb, the entry anchor and stencil pair it chose, the materials it stamped, and any warning that is otherwise silent. Event-driven, so it stays quiet until something happens — a scene load plus one hotkey press is a few hundred lines. OFF by default: a shipped build logs nothing at all. Turn it on, reproduce the problem, then send the log. Takes effect live.");
             ApplyLogVisibility();
@@ -213,6 +213,37 @@ namespace LiquidWobbleMPB
             // Hotkey + live config only - NO per-frame scanning/applying (that's event-driven).
             if (_cfgAutoBodyReveal != null)      AutoBodyReveal.Enabled  = CfgEnabled && _cfgAutoBodyReveal.Value;   // master OFF disables the auto-apply path too.
             if (_cfgDebugLog != null)            AutoBodyReveal.Debug    = _cfgDebugLog.Value;
+            // One-shot respawn after its own forced uncensor body reload (see MainGameWomb.RespawnAt).
+            if (MainGameWomb.DeferredSpawnAt > 0f && Time.unscaledTime >= MainGameWomb.DeferredSpawnAt)
+            {
+                bool ready = MainGameWomb.BpBodyReady(MainGameWomb.DeferredSpawnFemale);
+                bool giveUp = MainGameWomb.DeferredSpawnDeadline > 0f && Time.unscaledTime >= MainGameWomb.DeferredSpawnDeadline;
+                if (!ready && !giveUp) { MainGameWomb.DeferredSpawnAt = Time.unscaledTime + 0.1f; }   // keep polling.
+                else
+                {
+                MainGameWomb.DeferredSpawnAt = 0f;
+                MainGameWomb.DeferredSpawnDeadline = giveUp ? 1f : 0f;
+                if (CfgEnabled && !MainGameWomb.AnySpawned())
+                {
+                    if (MainGameWomb.DeferredSpawnDeadline > 0f)
+                        _logger?.LogError("CloXray: the forced uncensor reload never reported completion — spawning the womb anyway; it may need one more hotkey press.");
+                    else
+                        _logger?.LogInfo("CloXray: body reload finished — spawning the womb now (one hotkey press).");
+                    MainGameWomb.ToggleWhy = "deferred-spawn";
+                    MainGameWomb.DeferredSpawnDeadline = 0f;
+                    MainGameWomb.Toggle(this);
+                }
+                }
+            }
+            if (MainGameWomb.RespawnAt > 0f && Time.unscaledTime >= MainGameWomb.RespawnAt)
+            {
+                MainGameWomb.RespawnAt = 0f;
+                if (CfgEnabled && MainGameWomb.AnySpawned())
+                {
+                    _logger?.LogInfo("CloXray: respawning the H womb — " + MainGameWomb.RespawnWhy + ".");
+                    MainGameWomb.ToggleWhy = "reload-respawn"; MainGameWomb.Toggle(this); MainGameWomb.ToggleWhy = "reload-respawn"; MainGameWomb.Toggle(this);
+                }
+            }
             AutoBodyReveal.MaxRange = CfgAutoBodyRevealRange;
             if (MainGameWomb.IsStudio)
             {

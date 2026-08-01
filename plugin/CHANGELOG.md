@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.1
+
+- **The womb never turned see-through on some setups** — its shaders were not loading correctly there,
+  so the x-ray window never formed, the liquid misbehaved and the wobble sliders were inactive. Fixed
+  in the womb item. If you had to re-pick the shader in Material Editor to make a womb work, you do
+  not any more.
+- **BetterPenetration threw an exception every frame after removing a womb in H**, which also left the
+  penis mis-positioned and got worse with each toggle. The plugin was handing BP a reference to an
+  object it had just destroyed; BP now gets its own target back and the penis with it.
+- Removing the womb in H removes the x-ray it applied — body, skin veil, clothes and the penis copy.
+- The womb needed two hotkey presses in H on a character without a BP uncensor; one is enough now.
+- The male's balls no longer turn white on the hotkey (the forced uncensor swap skipped the skin pass),
+  and the shaft/balls junction no longer shows as a white sliver through the body.
+- Cum survives toggling the womb off and on, and any internal respawn. Only a real pull-out drains it.
+- Fixed the canal not opening at all on some poses: a calibration acted on an impossible measurement.
+- The womb's canal geometry now comes only from the mesh's own marker bone.
+
 ## 1.1.0
 
 - Free-H support in KK and KKS. `Shift+Alt+W` toggles the womb on the H female (rebindable in the

@@ -147,7 +147,7 @@ namespace LiquidWobbleMPB
         private float[] _colRingRadius;   // per-ring MAX collider world radius (thickest collider reaching that ring).
         private bool _colPerRing;   // true when the collider path drove with per-ring radii available.
         private bool  _bpVaginaMain;   // engaged via BP-depth on the paired vagina without bone-containment (the bones sit below the cervix).
-        private bool  _bpGeomDepth;   // depth came from the tip's position in the canal (BP reported none)
+        private bool  _bpGeomDepth;   // depth came from the tip's position in the canal (BP reported none).
         private bool  _tipDetached;   // tip marker k_f_dan_end pulled beyond the detach distance -> treated as withdrawn (debug).
         private float _tipDist = -1f;   // distance from the womb entrance to k_f_dan_end (m); -1 = no tip (debug).
         private bool  _entryDetached;   // entry marker k_f_dan_entry swung off the canal axis (penis base withdrawn) -> withdrawn (debug).
@@ -264,6 +264,7 @@ namespace LiquidWobbleMPB
         public bool ExternalPenetrated;
         public bool HasPenetratedFlag;
         private Transform _canalBone;
+        private bool _canalCalWarned;
         private float _bakedCanalLen;
         private const float RefCanalLen = 0.085f;
         private float _lastGirthScale = 1f;
@@ -274,8 +275,27 @@ namespace LiquidWobbleMPB
         private float[] _diaBuf; private int _diaN;
         private static string s_bpMale; private static float s_bpDiaMM;
         private float[] _bpDiaBuf; private int _bpDiaN;
+        private bool _bpRelatch;
         // male's latch.
         private static float s_latchNatural;
+        // sizes the canal wrong for the new one.
+        private int _girthPoseVer = -1;
+        private void ResetGirthOnPoseChange()
+        {
+            if (MainGameWomb.IsStudio) return;
+            int pv = MainGameWomb.PoseVersion;
+            if (_girthPoseVer == pv) return;
+            if (!ExternalFitLocked) return;
+            bool had = _girthPoseVer >= 0 && (s_bpDiaMM > 0f || s_diaMM > 0f);
+            _girthPoseVer = pv;
+            if (!had) return;
+            // Restart the medians but keep the current width live: blanking it drove the canal from 0mm for
+            // the ~15 frames the new median takes ("bpLatch=0.0mm" in the log), so the canal collapsed and re-opened on every pose change.
+            _bpRelatch = true; _bpDiaN = 0; _diaN = 0; _girthRiseMM = 0f;
+            LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: girth re-measure armed (pose v" + pv
+                + ") — re-measuring his girth for the new pose.");
+        }
+
         private void ResetGirthOnNewMale()
         {
             float natNow = BPInnerTargetPin.NaturalDanLen;
@@ -288,15 +308,16 @@ namespace LiquidWobbleMPB
         private void LatchBPGirth(float diaMM, string key)
         {
             ResetGirthOnNewMale();
+            ResetGirthOnPoseChange();
             if (diaMM <= 1e-3f) return;
             if (key == null) key = "BP";
             if (key != s_bpMale) { s_bpMale = key; s_bpDiaMM = 0f; _bpDiaN = 0; _girthRiseMM = 0f; }
-            if (s_bpDiaMM > 0f) return;
+            if (s_bpDiaMM > 0f && !_bpRelatch) return;
             if (_bpDiaBuf == null) _bpDiaBuf = new float[15];
             if (_bpDiaN < _bpDiaBuf.Length) _bpDiaBuf[_bpDiaN++] = diaMM;
             if (_bpDiaN >= _bpDiaBuf.Length)
             {
-                var srt = (float[])_bpDiaBuf.Clone(); System.Array.Sort(srt); s_bpDiaMM = srt[srt.Length / 2];
+                var srt = (float[])_bpDiaBuf.Clone(); System.Array.Sort(srt); s_bpDiaMM = srt[srt.Length / 2]; _bpRelatch = false;
                 LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: BP penis girth LATCHED at " + s_bpDiaMM.ToString("F1")
                     + "mm for '" + s_bpMale + "' (median of 15 BP reads) — OWNS the canal opening over the collider path.");
             }
@@ -305,10 +326,11 @@ namespace LiquidWobbleMPB
         private void LatchGirth(float diaMM, string key)
         {
             ResetGirthOnNewMale();
+            ResetGirthOnPoseChange();
             if (diaMM <= 1e-3f) return;
             if (key == null) key = "H-collider";
             if (key != s_diaMale) { s_diaMale = key; s_diaMM = 0f; _diaN = 0; }
-            if (s_diaMM > 0f) return;
+            if (s_diaMM > 0f && !_bpRelatch) return;
             if (_diaBuf == null) _diaBuf = new float[15];
             if (_diaN < _diaBuf.Length) _diaBuf[_diaN++] = diaMM;
             if (_diaN >= _diaBuf.Length)
@@ -544,6 +566,18 @@ namespace LiquidWobbleMPB
                 float angErr = Vector3.Angle(_canalBone.up, meshAxis);
                 // Move the canal-line bone onto the TRUE skinned canal when the rig-arrangement skinning
                 // shift put it off (KKS); a donor-rig wearer (KK) reads ~0 and is left untouched.
+                float sane = Mathf.Max(0.02f, _canalLen) * 1000f * 2f;
+                if (posErr > sane)
+                {
+                    if (!_canalCalWarned)
+                    {
+                        _canalCalWarned = true;
+                        LiquidWobbleMPBPlugin._logger?.LogError("CloXray: CANAL-CAL error " + posErr.ToString("F0")
+                            + "mm exceeds twice the canal length (" + (_canalLen * 1000f).ToString("F0")
+                            + "mm) — bone and bake disagree by more than a skinning shift can explain. NOT moving the bone.");
+                    }
+                    return;
+                }
                 bool moved = posErr >= 3f || angErr >= 2f;
                 if (moved)
                 {
@@ -824,36 +858,37 @@ namespace LiquidWobbleMPB
 
         private void RefreshCanalWorld()
         {
-            // Bake-based re-projection: gives _canalLen + the fallback when the mesh has no canal bone.
-            if (_canalLocal != null && _canalLocal.Length >= 2)
+            // ONE source of truth: the mesh's own `clo_canal_entry` marker bone.
+            if (_canalLocal != null && _canalLocal.Length >= 2 && _smr != null)
             {
                 if (_canalBandW == null || _canalBandW.Length != _canalLocal.Length) _canalBandW = new Vector3[_canalLocal.Length];
                 for (int i = 0; i < _canalLocal.Length; i++) _canalBandW[i] = _smr.transform.TransformPoint(_canalLocal[i]);
-                Vector3 e = _canalBandW[0], t = _canalBandW[_canalBandW.Length - 1];
-                Vector3 ax = t - e; float l = ax.magnitude;
-                // The plausibility band is RELATIVE to the womb's live scale.
-                Vector3 ws = _smr != null ? _smr.transform.lossyScale : Vector3.one;
-                float s = Mathf.Max(1e-3f, Mathf.Max(Mathf.Abs(ws.x), Mathf.Max(Mathf.Abs(ws.y), Mathf.Abs(ws.z))));
-                if (l >= 0.02f * s && l <= 0.5f * s) { _canalEntrance = e; _canalAxis = ax / l; _canalLen = l; }
-                else ReportCanalRejected(l, s);
             }
-            if (_canalBone != null && _canalLen > 1e-4f)
+            if (_canalBone == null)
             {
-                _canalEntrance = _canalBone.position;
-                _canalAxis = _canalBone.up;
-                if (_canalLocalLen > 1e-4f)
+                if (!_canalMarkerWarned)
                 {
-                    // Validate the REST length (scale-free) and then apply the live scale, so any
-                    // character/item scale is accepted while a degenerate bake is still rejected.
-                    float sy = Mathf.Abs(_canalBone.lossyScale.y);
-                    float lb = _canalLocalLen * sy;
-                    if (_canalLocalLen >= 0.02f && _canalLocalLen <= 0.5f && lb > 1e-4f) _canalLen = lb;
-                    else ReportCanalRejected(lb, sy);
+                    _canalMarkerWarned = true;
+                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: womb '" + name + "' has no clo_canal_entry marker bone — "
+                        + "canal entrance/axis/length are UNKNOWN and nothing is driven. Re-add the womb from the current mod.");
                 }
-                if (_canalBandW == null || _canalBandW.Length < 2) _canalBandW = new Vector3[2];
-                _canalBandW[0] = _canalEntrance;
-                _canalBandW[_canalBandW.Length - 1] = _canalEntrance + _canalAxis * _canalLen;
+                return;
             }
+            if (_canalLocalLen < 0.02f || _canalLocalLen > 0.5f)
+            {
+                ReportCanalRejected(_canalLocalLen, 1f);
+                return;
+            }
+            float syB = Mathf.Abs(_canalBone.lossyScale.y);
+            float lenB = _canalLocalLen * syB;
+            if (lenB <= 1e-4f) { ReportCanalRejected(lenB, syB); return; }
+            _canalEntrance = _canalBone.position;
+            _canalAxis = _canalBone.up;
+            _canalLen = lenB;
+            if (_canalBandW == null || _canalBandW.Length < 2) _canalBandW = new Vector3[2];
+            _canalBandW[0] = _canalEntrance;   // endpoints from the BONE.
+            _canalBandW[_canalBandW.Length - 1] = _canalEntrance + _canalAxis * _canalLen;
+
             // H BASE CANAL STRETCH: a resting womb_displace elongates the whole womb.
             _canalRestLen = _canalLen;
             if (!MainGameWomb.IsStudio && _canalLen > 1e-4f)
