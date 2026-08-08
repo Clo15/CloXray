@@ -1859,7 +1859,14 @@ namespace LiquidWobbleMPB
                 }
                 else
                 {
-                    float trackK = (st > _stretchReaction) ? 26f : (st > 0.01f ? 26f : 7f);
+                    // Rise speed: the fit path's tip signal is precise, so the dome tracks it fast
+                    // (26/s - slower lagged the arriving tip and the penis tunneled in). With
+                    // auto-length OFF the drive signals are coarser (commanded stop depth / thrust
+                    // envelope) and the same speed reads as a shove - track gently there (9/s).
+                    // Fall stays 7/s once the tip has left: while inside, the tip holds the dome
+                    // and the reaction follows it tightly both ways; only the residual relaxes calm.
+                    float riseK = LiquidWobbleMPBPlugin.CfgHAutoLength ? 26f : 9f;
+                    float trackK = (st > _stretchReaction) ? riseK : (st > 0.01f ? riseK : 7f);
                     _stretchReaction = Mathf.Lerp(_stretchReaction, st, 1f - Mathf.Exp(-trackK * Time.deltaTime));
                 }
 

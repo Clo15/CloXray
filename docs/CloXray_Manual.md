@@ -112,6 +112,14 @@ Stamped-window setups — a plane stamping `StencilRef 128` with organ items on 
 — work as before, nothing to set. Limb blocking marks limbs with its own region value, so stencil
 bit 7 stays free for these scenes, and her hands now block a machine window too.
 
+### Penis size bias (Free-H)
+
+With *Auto penis length* on, the fit aims the deepest push at the womb's cervix. The F1 slider
+**"Auto penis length: size bias (%)"** moves that aim: above 100 = a slightly longer penis that
+pushes past the cervix, below 100 = a shorter one that stops just before it. The fit still
+measures every animation, so the stroke stays visible at any setting. Applies on the next pose
+change.
+
 ### Scenes saved before womb 7.4.1
 
 They load and work. The womb's internal bones got a `clo_` prefix in 7.4.0 so they stop clashing

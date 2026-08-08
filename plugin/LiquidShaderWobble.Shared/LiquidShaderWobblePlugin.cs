@@ -45,6 +45,7 @@ namespace LiquidWobbleMPB
         private static ConfigEntry<bool>  _cfgHPullOutFlow;
         private static ConfigEntry<bool>  _cfgHAutoLength;
         private static ConfigEntry<float> _cfgHWombBack;
+        private static ConfigEntry<float> _cfgHInStroke;
         private static ConfigEntry<string> _cfgHBPDanOptions;
 
         // false = CloXray's TWO BetterPenetration work-arounds are OFF, so the BP-source fixes can be
@@ -116,7 +117,11 @@ namespace LiquidWobbleMPB
         public const float CfgHStrokeDeep      = 72f;
         public const float CfgHMoundDown       = 50f;
         public const float CfgHContactPct      = 85f;
-        public const float CfgHInStrokePct     = 100f;
+        // b977: un-frozen back into F1 by request - the one honest "penis slightly longer/shorter
+        // vs the auto fit" knob. It scales the fit TARGET (where the deepest push should land
+        // relative to the cervix), so the fit still measures every animation and the stroke stays
+        // visible at any setting - the caps (0.6x..1.25x natural) still apply.
+        public static float CfgHInStrokePct     => _cfgHInStroke != null ? _cfgHInStroke.Value : 100f;
         public const float CfgHBaseStretchPct  = 0f;
         public const float CfgHWombPush        = 1.15f;   // b674 DefaultWombPush — dome leads the tip slightly
         public const bool  CfgHPenisBottomWindow = true;
@@ -209,6 +214,8 @@ namespace LiquidWobbleMPB
             _cfgHWombBack = Config.Bind("Free-H", "Womb offset to back (mm)", 2f,
                 new ConfigDescription("MAIN GAME only: shifts the whole womb along her front/back axis (pelvis frame — follows the pose). LOWER = toward her BACK, higher = toward her belly (the kokan bone's forward axis points into her body, so the shift runs the opposite way to what the name suggests — verified on screen 2026-08-07). Live.", new AcceptableValueRange<float>(-20f, 30f)));
 
+            _cfgHInStroke = Config.Bind("Free-H", "Auto penis length: size bias (%)", 100f,
+                new ConfigDescription("MAIN GAME only, with 'Auto penis length' ON: where the auto fit aims the deepest push, relative to the womb's cervix. 100 = at the cervix (the tuned default). Above 100 = a slightly LONGER penis (the deepest push lands past the cervix, more dome push); below 100 = slightly shorter (stops just before it). The fit still measures every animation, so the stroke stays visible at any setting. Takes effect on the next pose/animation change.", new AcceptableValueRange<float>(50f, 140f)));
 
             // all poked.
 

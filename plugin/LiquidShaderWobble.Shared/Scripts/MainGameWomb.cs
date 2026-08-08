@@ -2998,6 +2998,28 @@ namespace LiquidWobbleMPB
                     }
                 }
 #endif   // CLOXRAY_RESEARCH
+                // LEGACY pin (auto-length OFF, b975): no fit state exists, but the canal solvers still
+                // read the fit fields - starving them was why the canal stopped matching the penis on
+                // this path:
+                // - ExternalFitLocked is written only by the fit. Toggling auto-length off mid-measure
+                // left it FALSE forever: the girth latch refused to re-measure on any later pose
+                // (early-return) and the stretch stayed clamped to base.
+                // - FitSquishRatio / NaturalDanLen are static and only the fit wrote them - stale from
+                // a previous male or session, or 1.0 while BP is actually STRETCHING the visual shaft
+                // to the constrained pin and the stroke drive sweeps squish per frame. That is the
+                // exact physics the b737/b738 corrector exists for; feed it the legacy inputs:
+                // visual length = base->pin (dan_end is constrained there), natural = BP's own
+                // m_baseDanLength captured at wiring.
+                if (!autoLen && _womb != null)
+                {
+                    _womb.ExternalFitLocked = true;
+                    if (_danLen0 > 1e-3f)
+                    {
+                        NaturalDanLen = _danLen0;
+                        float dLegacy = _danBase != null ? Vector3.Distance(_danBase.position, rawPin) : 0f;
+                        if (dLegacy > 1e-3f) FitSquishRatio = Mathf.Clamp(dLegacy / _danLen0, 0.5f, 1.25f);
+                    }
+                }
                 if (autoLen)
                 {
                     float canal = _womb.CanalLenWorld;
@@ -3197,7 +3219,13 @@ namespace LiquidWobbleMPB
                 // so the tip's stop depth travels shallow..deep.
                 else if (_danOpts != null && _fSquishThr != null && _danLen > 1e-3f)
                 {
-                    float mm = Mathf.Lerp(LiquidWobbleMPBPlugin.CfgHStrokeShallow, LiquidWobbleMPBPlugin.CfgHStrokeDeep, _pushSm);
+                    float capMM = (_womb.HasCanal && _womb.CanalLenWorld > 1e-4f)
+                        ? (_womb.CanalLenWorld + _womb.CurrentDomeTravelMM * 0.001f) * 1000f
+                        : LiquidWobbleMPBPlugin.CfgHStrokeDeep;
+                    float mm = range > 0.006f
+                        ? Mathf.Lerp(LiquidWobbleMPBPlugin.CfgHStrokeShallow,
+                                     Mathf.Max(LiquidWobbleMPBPlugin.CfgHStrokeShallow + 5f, capMM), _pushSm)
+                        : capMM;
                     try { _lastThr = Mathf.Clamp(mm * 0.001f / _danLen, 0.02f, 0.95f); _fSquishThr.SetValue(_danOpts, _lastThr); _womb.ExternalStrokeMM = mm; }
                     catch { }
                 }

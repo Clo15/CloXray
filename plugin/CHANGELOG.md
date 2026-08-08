@@ -20,6 +20,13 @@
   load; links to deleted bones are reported instead of silently dropped.
 - Womb item 7.4.1 — identical shape, and its Studio item-FK bone list works again.
 - Removed a debug overlay that could draw a blue ring on the penis while the diagnostic log was on.
+- **Free-H with *Auto penis length* OFF works properly again** — the canal expansion follows the
+  penis on that path too (it could stay clamped after toggling the setting off mid-play), a penis
+  that never reaches the womb is no longer squished, and the womb reacts more calmly to the stroke.
+- **New F1 slider: "Auto penis length: size bias (%)"** — with auto length ON, aims the fit
+  slightly longer (above 100) or shorter (below 100) relative to the womb's cervix; every
+  animation keeps a visible stroke at any setting.
+- The Free-H womb entrance point is re-tuned per game — KK and KKS each keep their own seat.
 
 ## 1.1.1
 

@@ -83,7 +83,7 @@ namespace LiquidWobbleMPB
         // shader's CUM_SPLIT_BIAS and the build's CUM_CHAMBER_GAP/2.
         private const float ChamberSplitBias = 0.0015f;
         // DIAGNOSTIC build stamp — bump every plugin build so the log proves which DLL is live.
-        public const int PluginBuild = 974;   // build stamp — bump every build. Full history: LiquidShaderWobble\CHANGELOG.md
+        public const int PluginBuild = 978;   // build stamp — bump every build. Full history: LiquidShaderWobble\CHANGELOG.md
         // 0 = measure the chamber extents every frame (dirty-gated). Throttling made the fill
         // plane lag the geometry during rotation; a dirty frame is cheap (basis weighted sum + walk).
         public float ExtentPeriod { get; set; } = 0f;
