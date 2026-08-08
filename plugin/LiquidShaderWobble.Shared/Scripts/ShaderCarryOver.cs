@@ -10,7 +10,7 @@ namespace LiquidWobbleMPB
     internal static class ShaderCarryOver
     {
         private const string CloPrefix = "CloXray/";
-        private const int OriginalRedrawQueue = 3502;   // the one non-CloXray copy it still recreate (penis look).
+        private const int OriginalRedrawQueue = 3502;   // the one non-CloXray copy we still recreate (penis look)
 
         // Unity property names (with leading _) of every setting the shaders expose.
         private static readonly string[] KnownProps =
@@ -22,12 +22,12 @@ namespace LiquidWobbleMPB
 
         private class CopyRec
         {
-            public string baseName;   // cf_m_body / cm_m_dankon.
-            public int index;   // .MECopyN index, for a stable recreate order.
-            public bool clo;   // shader is one of its own.
-            public string shader;   // shader name (applied only when clo).
-            public int queue;   // render queue.
-            public readonly Dictionary<string, float> floats = new Dictionary<string, float>();   // ME-name -> value.
+            public string baseName;                 // cf_m_body / cm_m_dankon
+            public int index;                       // .MECopyN index, for a stable recreate order
+            public bool clo;                        // shader is one of ours
+            public string shader;                   // shader name (applied only when clo)
+            public int queue;                       // render queue
+            public readonly Dictionary<string, float> floats = new Dictionary<string, float>();   // ME-name -> value
         }
         private class Snap { public readonly List<CopyRec> copies = new List<CopyRec>(); public int stencil = -1; }
 
@@ -208,14 +208,14 @@ namespace LiquidWobbleMPB
                         dbg += "\n    [" + r.name + "] '" + m.name + "' shader='" + m.shader.name + "' q=" + m.renderQueue;
                     if (!isCopy) continue;
                     bool clo = m.shader.name.StartsWith(CloPrefix);
-                    bool origLook = !clo && m.renderQueue == OriginalRedrawQueue;   // penis original-look copy.
+                    bool origLook = !clo && m.renderQueue == OriginalRedrawQueue;   // penis original-look copy
                     if (!clo && !origLook) continue;
                     if (bodyT == null || !r.transform.IsChildOf(bodyT)) { skippedClothes++; continue; }
 
                     var rec = new CopyRec { baseName = BaseName(m.name), index = CopyIndex(m.name), clo = clo, shader = m.shader.name, queue = m.renderQueue };
                     if (clo)
                         foreach (var up in KnownProps)
-                            if (m.HasProperty(up)) rec.floats[up.Substring(1)] = m.GetFloat(up);   // ME name drops the leading _.
+                            if (m.HasProperty(up)) rec.floats[up.Substring(1)] = m.GetFloat(up);   // ME name drops the leading _
                     snap.copies.Add(rec);
                     if (m.HasProperty("_StencilRef")) snap.stencil = Mathf.RoundToInt(m.GetFloat("_StencilRef"));
                 }
@@ -262,7 +262,7 @@ namespace LiquidWobbleMPB
                     // CloXray copy -> set the shader; NON-CloXray (penis look) -> keep the new char's own
                     // shader.
                     if (rec.clo && !string.IsNullOrEmpty(rec.shader)) _mSetShader.Invoke(ctrl, new object[] { 0, _otChar, nw, rec.shader, go, true });
-                    _mSetQueue.Invoke(ctrl, new object[] { 0, _otChar, nw, rec.queue, go, true });   // queue = look-neutral, always safe.
+                    _mSetQueue.Invoke(ctrl, new object[] { 0, _otChar, nw, rec.queue, go, true });   // queue = look-neutral, always safe
                     if (rec.clo)
                         foreach (var p in rec.floats)
                             _mSetFloat.Invoke(ctrl, new object[] { 0, _otChar, nw, p.Key, p.Value, go, true });

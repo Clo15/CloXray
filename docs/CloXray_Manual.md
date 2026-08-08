@@ -91,6 +91,39 @@ On a bottle / other item: apply the `CloXray/Liquid` shader to a liquid mesh cop
 
 ---
 
+### Hands and limbs block the x-ray
+
+Her hands, arms and shins block the window now — a hand over the belly hides the womb behind it.
+Thighs stay see-through on purpose.
+
+- **Bare limbs** work out of the box.
+- **Clothed limbs** (a sleeve over the hand) are off by default — fabric needs a per-outfit width.
+  Set `LimbBlockInflate` on the body's BodyReveal copy in Material Editor (start at `0.01`, up to
+  `0.06` for a loose sleeve).
+- Off for one character: `RegionMaskCutoff = 0` on that same copy. Off for everyone: the F1 switch
+  **"Hands and limbs block the x-ray"**.
+
+Values set in Material Editor are never overwritten by a re-apply. Scenes saved with older versions
+pick all this up on the first hotkey press.
+
+### X-ray machine scenes
+
+Stamped-window setups — a plane stamping `StencilRef 128` with organ items on `StencilBody 132/133`
+— work as before, nothing to set. Limb blocking marks limbs with its own region value, so stencil
+bit 7 stays free for these scenes, and her hands now block a machine window too.
+
+### Scenes saved before womb 7.4.1
+
+They load and work. The womb's internal bones got a `clo_` prefix in 7.4.0 so they stop clashing
+with the character's own bones in ABMX. On load:
+
+- NodesConstraints links to womb bones are rewritten to the new names automatically — re-save the
+  scene and it sticks.
+- A link to one of the 13 bones that were *removed* can't be restored; it is reported in the log
+  instead of silently dropped — re-make that constraint.
+- KKPE edits made directly on womb bones do not migrate.
+- Fill, canal and shape sliders load normally.
+
 ## Requirements
 Koikatsu (KK) and Koikatsu Sunshine (KKS) are both supported, in CharaStudio and in Free-H.
 

@@ -50,10 +50,13 @@ namespace LiquidWobbleMPB
         // womb_displace driver: ramps from StretchStart (normalized depth) to 1.0 reaching StretchMax; past
         // 1.0 (overshoot) keeps growing by StretchOvershoot per unit, capped at StretchCap.
         public float StretchMax { get; set; } = 12f;
-        public float StretchStart { get; set; } = 0.5f;
+        public float StretchStart { get; set; } = 0.5f;     // start displacing earlier (was 0.8)
         public float StretchOvershoot { get; set; } = 25f;
-        public float StretchCap { get; set; } = 100f;
-        // Displace scales with BP penis LENGTH (m_baseDanLength).
+        public float StretchCap { get; set; } = 100f;   // FIXED at 100 — a >100 blendshape write latches/sticks in KKPE, so this was always 100; no longer a cfg (to displace more, strengthen the womb_displace SHAPE in the mesh)
+        // Displace scales with BP penis LENGTH (m_baseDanLength): a longer / deeper-set penis displaces
+        // the womb MORE. lengthScale = clamp(baseLen / RefLength, 0.6, 2). Set RefLength to your default
+        // penis's logged baseLen (see the WombExpand debug line). DirReactWeight = how far the mouth
+        // leans toward the incoming penis direction (moundforward/back); 0 = off, "a little" ~25.
         public float RefLength { get; set; } = 0.10f;
         public float DirReactWeight { get; set; } = 25f;
 
@@ -65,7 +68,7 @@ namespace LiquidWobbleMPB
         // EntranceOpenScale makes V1 open that-many-times slower; MaxGirthScale caps girth->width scaling.
         public float OpenTime { get; set; } = 0.2f;
         public float EntranceOpenScale { get; set; } = 2f;
-        public float MaxRingWeight { get; set; } = 100f;
+        public float MaxRingWeight { get; set; } = 100f;   // FIXED at 100 — a >100 blendshape write latches/sticks in KKPE; no longer a cfg (widen the mesh tube to open beyond this)
         public float MaxGirthScale { get; set; } = 2.5f;
 
         // Below this raw depth the penis is treated as not penetrating (BP parks lastDanDistance at baseLen
@@ -89,11 +92,11 @@ namespace LiquidWobbleMPB
         public float HIntentDepth { get { return _hIntentDepth; } }
         // MAIN-GAME engagement grace: hold-open window + the drive values frozen through a dropout.
         private float _hEngHold, _hEngDepth, _hEngGirth = 1f, _hEngLen = 1f;
-        private float _hStrokeMax, _hOnset;   // MAIN GAME: auto-calibrated deepest stroke reach + the contact-point onset (mm).
-        private float _girthLogNext;
-        private bool _bpHadGirthThisFrame;
-        private float _tipMinMM;
-        private float _girthRiseMM;
+        private float _hStrokeMax, _hOnset;   // MAIN GAME: auto-calibrated deepest stroke reach + the contact-point onset (mm)
+        private float _girthLogNext;          // b664: throttle for the GIRTH-DRIVE diagnostic
+        private bool _bpHadGirthThisFrame;    // b666: BP reported a real girthTip this frame -> collider latch stands down
+        private float _tipMinMM;              // b669: shallow-end tip depth (parked-overshoot baseline for the displace drive)
+        private float _girthRiseMM;           // b670: rise-only live girth (canal follows BP inflation UP at the limit, never down)
         // MAIN-GAME commanded stroke depth (mm past the entrance), fed by BPInnerTargetPin's sweep.
         public float ExternalStrokeMM;
         public float ExternalCompressMM;
@@ -108,10 +111,10 @@ namespace LiquidWobbleMPB
         // Final (post-grace) engaged state - the pin/fill logic reads this to detect a real pull-out.
         public bool IsEngaged { get { return _dbgEngaged; } }
         public bool CanalReady { get { return _canalLen > 1e-4f; } }
-        public bool CanalCalibrated { get { return _canalCalibrated; } }
+        public bool CanalCalibrated { get { return _canalCalibrated; } }   // b618: loop must wait for the averaged calibration
         public Vector3 CanalEntranceW { get { return _canalEntrance; } }
         public void RecalibrateCanal()
-        {   // re-run the averaged calibration from scratch (the mesh was re-baked).
+        {   // re-run the averaged calibration from scratch (the mesh was re-baked)
             _canalCalibrated = false;
             _calN = 0; _calSumEnt = Vector3.zero; _calSumTop = Vector3.zero; _calSumDia = 0f; _calDiaN = 0; _calPrevFrac = -1f;
         }
@@ -124,46 +127,48 @@ namespace LiquidWobbleMPB
         private int _dampeningIdx = -1;
         private int _ignoreCollidersIdx = -1;
         private int _sensIdx = -1;
-        private float _sens = 1f;   // penetration sensitivity factor this frame (1.0 = default); scales the containment lateral gate.
-        private Transform _entranceBone;
+        private float _sens = 1f;          // penetration sensitivity factor this frame (1.0 = default); scales the containment lateral gate
+        private Transform _entranceBone;     // item's clo_cf_j_kokan = canal-entrance proxy (auto-BodyReveal proximity)
 
-        private float[] _ringReaction;   // plugin contribution (pre-strength) per ring, for decay.
+        private float[] _ringReaction;   // plugin contribution (pre-strength) per ring, for decay
         private float _stretchReaction;
         private int _moundFwdIdx = -1, _moundBackIdx = -1, _moundLeftIdx = -1, _moundRightIdx = -1;
-        private float _moundFwdReact, _moundBackReact, _moundLeftReact, _moundRightReact;   // direction-reaction contribution, for decay.
+        private float _moundFwdReact, _moundBackReact, _moundLeftReact, _moundRightReact;   // direction-reaction contribution, for decay
 
-        private float _depth;   // smoothed normalized depth.
+        private float _depth;            // smoothed normalized depth
         private bool _ready;
         private BPBridge.Reading _bp;
         // Canal axis (entrance->top, world) for collider-depth, baked + cached on a 2s timer (EnsureCanal).
         private Vector3 _canalEntrance, _canalAxis = Vector3.up;
-        private float _anchorBpLogNext;
-        private float _engMissT, _engMissLogNext;
+        private float _anchorBpLogNext;   // b740 ANCHOR-VS-BP(rebind) throttle
+        private float _engMissT, _engMissLogNext;   // b746 ENGAGE-TRACE state
         private float _canalLen, _canalTimer;
-        private float _colLateral = -1f;   // when a collider is in the canal, its centre's lateral offset from the axis (m); -1 = none (debug).
-        private float _bpLateral = -1f;   // BP penis tip's lateral offset from the canal axis (m); -1 = no pose/no bake (debug).
-        private float _bpClosest = -1f;   // closest any shaft bone came to the canal axis when NOT contained (debug).
-        private float[] _ringDepths;   // each ring's normalized canal depth (DepthStart..DepthEnd), for the collider per-ring scan.
-        private float[] _colRingRadius;   // per-ring MAX collider world radius (thickest collider reaching that ring).
-        private bool _colPerRing;   // true when the collider path drove with per-ring radii available.
+        private float _colLateral = -1f;   // when a collider is in the canal, its centre's lateral offset from the axis (m); -1 = none (debug)
+        private float _bpLateral = -1f;    // BP penis tip's lateral offset from the canal axis (m); -1 = no pose/no bake (debug)
+        private float _bpClosest = -1f;    // closest any shaft bone came to the canal axis when NOT contained (debug)
+        private float[] _ringDepths;       // each ring's normalized canal depth (DepthStart..DepthEnd), for the collider per-ring scan
+        private float[] _colRingRadius;    // per-ring MAX collider world radius (thickest collider reaching that ring) — multi-collider taper
+        private bool _colPerRing;          // true when the collider path drove with per-ring radii available
         private bool  _bpVaginaMain;   // engaged via BP-depth on the paired vagina without bone-containment (the bones sit below the cervix).
-        private bool  _bpGeomDepth;   // depth came from the tip's position in the canal (BP reported none).
-        private bool  _tipDetached;   // tip marker k_f_dan_end pulled beyond the detach distance -> treated as withdrawn (debug).
-        private float _tipDist = -1f;   // distance from the womb entrance to k_f_dan_end (m); -1 = no tip (debug).
-        private bool  _entryDetached;   // entry marker k_f_dan_entry swung off the canal axis (penis base withdrawn) -> withdrawn (debug).
-        private float _entryLat = -1f;   // lateral distance from the canal axis to k_f_dan_entry (m); -1 = no entry (debug).
-        // Vagina pairing: is THIS womb seated on a character's cf_J_Vagina_root?
+        private bool  _bpGeomDepth;        // depth came from the tip's position in the canal (BP reported none)
+        private bool  _tipDetached;        // tip marker k_f_dan_end pulled beyond the detach distance -> treated as withdrawn (debug)
+        private float _tipDist = -1f;      // distance from the womb entrance to k_f_dan_end (m); -1 = no tip (debug)
+        private bool  _entryDetached;      // entry marker k_f_dan_entry swung off the canal axis (penis base withdrawn) -> withdrawn (debug)
+        private float _entryLat = -1f;     // lateral distance from the canal axis to k_f_dan_entry (m); -1 = no entry (debug)
+        // Vagina pairing: is THIS womb seated on a character's cf_J_Vagina_root? Cached on a 2s timer (EnsureVaginaPairing).
+        // The MAIN penis signal: when BP penetrates the vagina this overlay sits on, react — bone geometry can't be trusted
+        // (length-squish + overlay seating bunch the dan bones far below the cervix while the mesh/BP sit deep).
         private bool  _vaginaPaired;
-        private bool  _vaginaFarLat;   // diag: vagina-paired but the penis is laterally beyond THIS womb's gate (it's in another/adjacent womb).
-        private float _vaginaDist = -1f;   // nearest cf_J_Vagina_root distance to the entrance (m); -1 = none (debug).
+        private bool  _vaginaFarLat;       // diag: vagina-paired but the penis is laterally beyond THIS womb's gate (it's in another/adjacent womb)
+        private float _vaginaDist = -1f;   // nearest cf_J_Vagina_root distance to the entrance (m); -1 = none (debug)
         private float _vaginaTimer;
-        private string _colName;   // name of the collider currently driving this womb (debug).
-        private bool  _colWarned;   // collider-react exception logged once.
-        private bool  _dbgEngaged;   // engagement state, exposed via IsEngaged; gates calibration + the mesh reaction.
-        private int    _seenRepairVersion;   // last _repairVersion this womb consumed -> a bump re-pairs it on the next post-IK frame (FULLY event-driven, no poll/fallback).
-        private string _pairedName;   // the character whose penis is paired to THIS womb (by entry node); read locked each frame.
-        private Vector3 _grabEntryW;   // paired penis's k_f_dan_entry world pos, read POST-NC in onPreCull (feeds the entry-detach gate).
-        private bool  _handoffLogged;   // one-shot: BP_Strength=0 hand-off logged.
+        private string _colName;           // name of the collider currently driving this womb (debug)
+        private bool  _colWarned;          // collider-react exception logged once
+        private bool  _dbgEngaged;   // engagement state, exposed via IsEngaged; gates calibration + the mesh reaction
+        private int    _seenRepairVersion;           // last _repairVersion this womb consumed -> a bump re-pairs it on the next post-IK frame (FULLY event-driven, no poll/fallback)
+        private string _pairedName;    // the character whose penis is paired to THIS womb (by entry node); read locked each frame
+        private Vector3 _grabEntryW;   // paired penis's k_f_dan_entry world pos, read POST-NC in onPreCull (feeds the entry-detach gate)
+        private bool  _handoffLogged;      // one-shot: BP_Strength=0 hand-off logged
 
         private void Start()
         {
@@ -175,7 +180,7 @@ namespace LiquidWobbleMPB
                 return;
             }
             _ready = true;
-            if (s_carryEff > 1e-3f) _openEfficiency = s_carryEff;
+            if (s_carryEff > 1e-3f) _openEfficiency = s_carryEff;   // b632: spawn at the last measured opening (see field)
             LiquidWobbleMPBPlugin._logger?.LogInfo(
                 $"{nameof(WombExpandEffect)} on '{name}': READY. mesh='{_smr.name}', rings={_ringIdx.Length}, " +
                 $"stretch={_stretchIdx >= 0}, strengthCtl={_strengthIdx >= 0}, dampCtl={_dampeningIdx >= 0}, ignoreColCtl={_ignoreCollidersIdx >= 0}, sensCtl={_sensIdx >= 0}.");
@@ -214,14 +219,15 @@ namespace LiquidWobbleMPB
             return cnt >= 4;
         }
 
-        private Vector3[] _canalBandW;   // canal endpoints (entrance, cervix) in WORLD.
-        private Vector3[] _canalLocal;   // canal endpoints (entrance, cervix) in LOCAL/rest space (constant; baked once).
-        private float _canalLocalLen;   // pure REST canal length (sharedMesh space).
-        private float _canalRestLen;   // world canal length before the H base-stretch elongation (for the base displace weight).
-        private float _baseStretchPctEff;
-        private Transform _ptBone;
-        // The character this womb sits in. Studio answers exactly; elsewhere it falls back to the nearest
-        // vagina/crotch bone.
+        private Vector3[] _canalBandW;     // canal endpoints (entrance, cervix) in WORLD — re-projected each frame
+        private Vector3[] _canalLocal;     // canal endpoints (entrance, cervix) in LOCAL/rest space (constant; baked once)
+        private float _canalLocalLen;      // pure REST canal length (sharedMesh space) — live scale re-applied per frame
+        private float _canalRestLen;       // world canal length BEFORE the H base-stretch elongation (for the base displace weight)
+        private float _baseStretchPctEff;  // b553: config base-stretch % + the hard-wired 6mm down-extension %
+        private Transform _ptBone;         // the womb's aim bone — penis_target2 (canal-frame, b499) or the old penis_target
+        // The character this womb sits in. Studio answers exactly (the item is parented to her, or her node
+        // is above it in the workspace tree); elsewhere it falls back to the nearest vagina/crotch bone.
+        // Resolved on the pairing event, not per frame, and re-resolved whenever the womb re-pairs.
         private Component _wearer;
         private int _wearerSeenVersion = -1;
         private Component Wearer()
@@ -239,7 +245,9 @@ namespace LiquidWobbleMPB
         {
             // penis_target in the whole scene.
             foreach (var t in GetComponentsInChildren<Transform>(true))
-                if (t != null && t.name == "penis_target2") return t;
+                if (t != null && t.name == "penis_target2") return t;   // the bone the pin actually targets (b499)
+            // b629: under REBIND the canal anchor (+PT2 child) is reparented under HER cf_j_kokan —
+            // outside this womb's subtree — so search the wearer too. PT2's name is unique on her.
             if (transform.parent != null)
                 foreach (var t in transform.parent.GetComponentsInChildren<Transform>(true))
                     if (t != null && t.name == "penis_target2") return t;
@@ -263,20 +271,31 @@ namespace LiquidWobbleMPB
         // The GAME's own penetration state (HFlag motion name, BP's rule).
         public bool ExternalPenetrated;
         public bool HasPenetratedFlag;
-        private Transform _canalBone;
-        private bool _canalCalWarned;
-        private float _bakedCanalLen;
-        private const float RefCanalLen = 0.085f;
-        private float _lastGirthScale = 1f;
-        private float _openEfficiency;
+        private Transform _canalBone;      // the mesh build clo_canal_entry marker bone (if the mesh has it) -> exact, scale/rotation-native
+        private bool _canalCalWarned;   // one-shot: CANAL-CAL saw an impossible error and refused to act
+        private float _bakedCanalLen;   // b561: true world canal length measured from the bake at calibration
+        private const float RefCanalLen = 0.085f;   // b566: reference womb canal (default female) for width scale-compensation
+        private float _lastGirthScale = 1f;   // b570: girthScale used last frame (for the opening-efficiency measure)
+        private float _openEfficiency;        // b570: measured mm canal-diameter per girthScale unit (the mesh's true opening rate)
+        // b632 — "precalculate expansion and spawn it at correct stretch": the efficiency is a
+        // mesh+scale property, stable across respawns of the same womb — carry the last measured value
+        // so a respawn (auto-parity iteration, mode toggle, pose change) opens at the CORRECT width
+        // immediately instead of running the over-predicting RefGirth model until the phase-locked
+        // calibration (up to 2 idle loops) re-seeds it ("spawns at max expansion, then slowly reduces").
+        // The calibration still overwrites it with the fresh averaged measure when it completes.
         private static float s_carryEff;
         // so there is no first-measure "snap" state to track.
         private static string s_diaMale; private static float s_diaMM;
+        private static string s_diaLoggedMale; private static float s_diaLoggedMM;   // last value the LATCHED line reported
         private float[] _diaBuf; private int _diaN;
         private static string s_bpMale; private static float s_bpDiaMM;
         private float[] _bpDiaBuf; private int _bpDiaN;
-        private bool _bpRelatch;
-        // male's latch.
+        private bool _bpRelatch;   // a pose change asked for a fresh median; the old width stays live meanwhile
+        // b738: name-keyed resets never fire on a CARD SWAP (dan names collide across male cards; the
+        // collider-latch key is a constant string by b651 design), so a swapped-in male inherited the
+        // previous male's latch (measured: bpLatch 44.2mm vs live tip 24.8mm on the small male = canal
+        // 2x too wide). Natural dan length is the stable per-male identity — reset EVERYTHING girth
+        // (both latches, both median buffers, the b736 rise) when it changes.
         private static float s_latchNatural;
         // sizes the canal wrong for the new one.
         private int _girthPoseVer = -1;
@@ -307,11 +326,11 @@ namespace LiquidWobbleMPB
         }
         private void LatchBPGirth(float diaMM, string key)
         {
-            ResetGirthOnNewMale();
+            ResetGirthOnNewMale();   // b738
             ResetGirthOnPoseChange();
             if (diaMM <= 1e-3f) return;
             if (key == null) key = "BP";
-            if (key != s_bpMale) { s_bpMale = key; s_bpDiaMM = 0f; _bpDiaN = 0; _girthRiseMM = 0f; }
+            if (key != s_bpMale) { s_bpMale = key; s_bpDiaMM = 0f; _bpDiaN = 0; _girthRiseMM = 0f; }   // b670: new male -> reset the rise too
             if (s_bpDiaMM > 0f && !_bpRelatch) return;
             if (_bpDiaBuf == null) _bpDiaBuf = new float[15];
             if (_bpDiaN < _bpDiaBuf.Length) _bpDiaBuf[_bpDiaN++] = diaMM;
@@ -325,7 +344,7 @@ namespace LiquidWobbleMPB
 
         private void LatchGirth(float diaMM, string key)
         {
-            ResetGirthOnNewMale();
+            ResetGirthOnNewMale();   // b738
             ResetGirthOnPoseChange();
             if (diaMM <= 1e-3f) return;
             if (key == null) key = "H-collider";
@@ -338,12 +357,19 @@ namespace LiquidWobbleMPB
                 var sortedDia = (float[])_diaBuf.Clone();
                 System.Array.Sort(sortedDia);
                 s_diaMM = sortedDia[sortedDia.Length / 2];
-                LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: penis diameter LATCHED at "
-                    + s_diaMM.ToString("F1") + "mm for '" + s_diaMale + "' (median of "
-                    + _diaBuf.Length + " reads; constant until another male appears).");
+                // Log the LATCH, not every frame it stays latched. _diaN is never reset, so once the
+                // buffer is full this block runs every frame a re-latch is armed - 49 identical lines in
+                // one session, all claiming to be a one-off. Only a value that actually moved is news.
+                if (s_diaMale != s_diaLoggedMale || Mathf.Abs(s_diaMM - s_diaLoggedMM) > 0.05f)
+                {
+                    s_diaLoggedMale = s_diaMale; s_diaLoggedMM = s_diaMM;
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: penis diameter LATCHED at "
+                        + s_diaMM.ToString("F1") + "mm for '" + s_diaMale + "' (median of "
+                        + _diaBuf.Length + " reads; constant until another male appears).");
+                }
             }
         }
-        private const float WidthMargin = 1.15f;
+        private const float WidthMargin = 1.15f;   // b669 — "slightly thicker": 15% room (was 10%; b583 grounding keeps it poke-free)
 
         private bool TryCanal(out Vector3 entranceW, out Vector3 topW)
         {
@@ -353,7 +379,7 @@ namespace LiquidWobbleMPB
                 // TRUE REST structure: the SHARED MESH vertices.
                 Vector3[] v = _smr.sharedMesh != null ? _smr.sharedMesh.vertices : null;
                 if (v == null) return false;
-                float minY = float.MaxValue;   // (orientation-robust: works for a rotated / anus-oriented womb).
+                float minY = float.MaxValue;                                // (orientation-robust: works for a rotated / anus-oriented womb)
                 for (int i = 0; i < v.Length; i++) if (v[i].y < minY) minY = v[i].y;
                 float seedx, seedz, seedSpread; int sc;
                 RingCenter(v, minY + 0.012f, 0.014f, 0f, 0f, 1f, out seedx, out seedz, out sc, out seedSpread);
@@ -364,7 +390,7 @@ namespace LiquidWobbleMPB
                     float yb = minY + off, ox, oz, spread; int cnt;
                     bool ok = RingCenter(v, yb, 0.009f, cx, cz, 0.040f, out ox, out oz, out cnt, out spread);
                     if (!ok) { if (centers.Count == 0) continue; else break; }
-                    if (centers.Count > 0 && (spread > 0.030f || spread > entranceSpread * 2.4f)) break;   // entered the uterus -> just past the cervix.
+                    if (centers.Count > 0 && (spread > 0.030f || spread > entranceSpread * 2.4f)) break;   // entered the uterus -> just past the cervix
                     if (centers.Count == 0) entranceSpread = Mathf.Max(spread, 0.004f);
                     centers.Add(new Vector3(ox, yb, oz)); cx = ox; cz = oz; topSpread = spread;
                 }
@@ -374,7 +400,7 @@ namespace LiquidWobbleMPB
                 // The canal is a straight axis: cache only the two endpoints (entrance + cervix) in LOCAL
                 // space.
                 _canalLocal = new Vector3[] { centers[0], centers[centers.Count - 1] };
-                _canalLocalLen = Vector3.Distance(centers[0], centers[centers.Count - 1]);   // pure REST length; live scale re-applied per frame.
+                _canalLocalLen = Vector3.Distance(centers[0], centers[centers.Count - 1]);   // pure REST length; live scale re-applied per frame
                 _canalBandW = new Vector3[] { _smr.transform.TransformPoint(_canalLocal[0]), _smr.transform.TransformPoint(_canalLocal[1]) };
                 return true;
             }
@@ -384,7 +410,7 @@ namespace LiquidWobbleMPB
         // Bake the canal SHAPE once. The local rest-mesh structure is CONSTANT.
         private void EnsureCanal(bool drive = false)
         {
-            if (_canalLen > 1e-4f && _canalLocal != null && _canalLocal.Length >= 2) return;   // have the constant shape -> never re-bake.
+            if (_canalLen > 1e-4f && _canalLocal != null && _canalLocal.Length >= 2) return;   // have the constant shape -> never re-bake
             _canalTimer -= Time.deltaTime;
             if (_canalTimer > 0f) return;
             _canalTimer = 0.05f;
@@ -396,7 +422,7 @@ namespace LiquidWobbleMPB
                 if (l >= 0.02f && l <= 0.5f)
                 {
                     _canalEntrance = entW; _canalAxis = ax / l; _canalLen = l;
-                    if (_canalBone == null)   // mesh bone supersedes the bake for entrance+axis (RefreshCanalWorld); search once.
+                    if (_canalBone == null)   // mesh bone supersedes the bake for entrance+axis (RefreshCanalWorld); search once
                     {
                         _canalBone = FindCanalBone();
                     }
@@ -418,31 +444,38 @@ namespace LiquidWobbleMPB
             _activeCount++;
             AutoBodyReveal.InstallWombHooks();
             InvalidateVaginaRoots();
-            RequestRepair();   // pair THIS new womb on the first frame its canal bakes (also covers the very first womb, when _repairVersion is still 0).
+            RequestRepair();   // pair THIS new womb on the first frame its canal bakes (also covers the very first womb, when _repairVersion is still 0)
         }
         private void OnDisable()
         {
             if (_canalPreCull != null) Camera.onPreCull -= _canalPreCull;
-            if (_activeCount > 0) _activeCount--;   // last womb gone -> the BP-interop hooks go inert (AnyActive=false).
+            if (_activeCount > 0) _activeCount--;   // last womb gone -> the BP-interop hooks go inert (AnyActive=false)
         }
         private void OnPreCullCanal(Camera cam)
         {
             if (!_ready) return;
-            if (!LiquidWobbleMPBPlugin.CfgEnabled) return;   // master toggle OFF -> freeze (no canal re-bake / pairing / markers).
-            if (Time.frameCount == _lastCanalFrame) return;   // first camera of the frame only.
+            if (!LiquidWobbleMPBPlugin.CfgEnabled) return;     // master toggle OFF -> freeze (no canal re-bake / pairing / markers)
+            if (Time.frameCount == _lastCanalFrame) return;   // first camera of the frame only
             _lastCanalFrame = Time.frameCount;
             _lastCanalCam = cam != null ? cam.name : "-";
             _lastCanalCamVisible = _smr != null && _smr.isVisible;
-            EnsureCanal(true);   // authoritative post-IK re-bake (timed) -> refreshes the LOCAL/rest canal.
+            EnsureCanal(true);          // authoritative post-IK re-bake (timed) -> refreshes the LOCAL/rest canal
+            // b674 — "womb jumps ~1s after spawn": run the analytic placement predictor the INSTANT
+            // the canal is acquired — it needs only the rest-mesh entrance band (built here) + her live
+            // bones, NOT the phase-locked calibration below (which waits for her idle loop to cross a fixed
+            // phase x2 = the ~1-3s the placement was blocked on). The nudge is stance-stable (it's the
+            // structural mirror-vs-rebind DIFFERENCE, not an absolute sample — logs show an identical
+            // (0,13.2,1.7) whenever it runs), so predicting early loses nothing. PredictParity self-guards
+            // (_parityPredicted); the old call inside the calibration block becomes a no-op backstop.
             if (!_parityPredicted && MainGameWomb.CurrentlyRebound
                 && _canalLen > 1e-4f && _canalLocal != null && _canalLocal.Length >= 2)
             {
-                EnsureCanalBands();   // build _bandEnt from the rest mesh now (idempotent; no-op later).
+                EnsureCanalBands();     // build _bandEnt from the rest mesh now (idempotent; no-op later)
                 PredictParity();
             }
-            CalibrateCanalToSkinnedMesh();
-            RefreshCanalWorld();   // every frame: re-project the cached LOCAL canal through the live transform.
-            MeasureOpenCanal();
+            CalibrateCanalToSkinnedMesh();   // b534: once, at rest — put the canal bone ON the true skinned canal
+            RefreshCanalWorld();        // EVERY frame: re-project the cached LOCAL canal through the live transform
+            MeasureOpenCanal();         // b570: measures the open-canal efficiency that feeds the ring drive
 
             // PAIRING - POST-NodesConstraints here, so k_f_dan_entry sits at its DRIVEN position.
             if (_seenRepairVersion != _repairVersion && _canalLen > 1e-4f)
@@ -455,21 +488,85 @@ namespace LiquidWobbleMPB
             // ExternalStrokeMM with danEnd projected on the canal.
             if (!MainGameWomb.IsStudio && _canalLen > 1e-4f)
             {
-                // is deleted).
-                if (HasPenisEnd)
+                // b496: this override is now the ONLY ExternalStrokeMM source in H (the pin's L−d2
+                // estimate is deleted). No readable danEnd => 0, never a stale last value.
+                // A pose change re-seats the womb, and for a few frames afterwards the canal frame is the
+                // OLD pose's. Projecting BP's endpoint onto it gives nonsense - measured lat=358mm and
+                // along=535mm on an 84mm canal - and because the gate then fails we fed the womb a
+                // FABRICATED ZERO, so it collapsed and re-inflated on every single pose change. That is
+                // the "womb didn't react on the first pose" report. Verified over 30 pose changes: every
+                // bad reading landed 3-5 log lines after a bump, and the user saw no visual fault at all.
+                //
+                // So: while the canal has not been re-calibrated for the CURRENT pose, drive nothing and
+                // hold what we last measured. Holding existing state is not a fallback path - it is
+                // declining to act on input we know is invalid, which is what the rule asks for.
+                if (MainGameWomb.AimedForPose != MainGameWomb.PoseVersion)
+                {
+                    LogAim(0f, 0f, true, true);   // reported as re-seating, not as an aim fault
+                }
+                else if (HasPenisEnd)
                 {
                     Vector3 er = ExternalPenisEnd - _canalEntrance;
                     float ea = Vector3.Dot(er, _canalAxis);
                     float el = (er - _canalAxis * ea).magnitude;
                     ExternalStrokeMM = (ea > 0f && el < _canalLen * 0.6f) ? ea * 1000f : 0f;
+                    LogAim(ea, el, true);
                 }
-                else ExternalStrokeMM = 0f;
+                else { ExternalStrokeMM = 0f; LogAim(0f, 0f, false); }
             }
 
-            _grabEntryW = BPBridge.GetEntryWorld(_pairedName);   // post-NC entry of the paired penis (feeds the entry-detach gate).
+            _grabEntryW = BPBridge.GetEntryWorld(_pairedName);   // post-NC entry of the paired penis (feeds the entry-detach gate)
         }
 
-        // TRUE skinned canal and the canal-line bone in KKS.
+        // AIM diagnostic (b883). The whole penis-mistarget class shows up right here: the tip is projected
+        // on the canal as ALONG (depth) and LAT (how far off the canal line it is), and the gate that
+        // decides whether the womb reacts at all is `along > 0 && lat < 60% of canal`. A mistarget is
+        // exactly LAT going large - the womb then reads zero depth and stops reacting while the penis is
+        // visibly inside her. Nothing in a 1.1 build reports this: H-STATE, CANAL-VERIFY and ENGAGE-ON
+        // were all stripped for release, so a mistarget report currently arrives with no evidence at all.
+        //
+        // Throttled to 1s, but a GATE FLIP is logged immediately - a brief mistarget between two ticks
+        // would otherwise be invisible, and "it happened once on that pose" is the usual report.
+        private float _aimLogAt;
+        private int _aimLastState = -1;   // -1 unknown, 0 no end, 1 out of canal, 2 in canal, 3 re-seating
+        private void LogAim(float alongM, float latM, bool hasEnd, bool reseating = false)
+        {
+            if (!AutoBodyReveal.Debug) return;
+            if (reseating)
+            {
+                if (_aimLastState == 3 && Time.unscaledTime < _aimLogAt) return;
+                bool firstReseat = _aimLastState != 3;
+                _aimLastState = 3; _aimLogAt = Time.unscaledTime + 1f;
+                if (firstReseat)
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: AIM [CHANGED] CANAL RE-SEATING after pose change"
+                        + " — holding the last depth (" + ExternalStrokeMM.ToString("F0") + "mm); the canal frame is still the old pose's,"
+                        + " so any projection onto it would be meaningless.");
+                return;
+            }
+            int state = !hasEnd ? 0 : ((alongM > 0f && latM < _canalLen * 0.6f) ? 2 : 1);
+            bool flip = state != _aimLastState;
+            if (!flip && Time.unscaledTime < _aimLogAt) return;
+            _aimLastState = state;
+            _aimLogAt = Time.unscaledTime + 1f;
+            string verdict = state == 0 ? "NO PENIS END (no depth feed)"
+                           : state == 2 ? "IN CANAL"
+                           : (alongM <= 0f ? "OUT: behind the entrance" : "OUT: OFF-AXIS -> womb gets NO depth feed");
+            LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: AIM " + (flip ? "[CHANGED] " : "")
+                + verdict + " | along=" + (alongM * 1000f).ToString("F1") + "mm lat=" + (latM * 1000f).ToString("F1")
+                + "mm (limit " + (_canalLen * 600f).ToString("F0") + "mm) canal=" + (_canalLen * 1000f).ToString("F0")
+                + "mm stroke=" + ExternalStrokeMM.ToString("F0") + "mm | motion='" + MainGameWomb.HMotion
+                + "' penetrated=" + MainGameWomb.HPenetrated);
+        }
+
+        // CANAL CALIBRATION (b534): the POSED-CANAL probe revealed a CONSTANT ~15mm/5° offset between
+        // the TRUE skinned canal and the canal-line bone in KKS — every pose, every loop. Cause: the
+        // bone was placed on the mesh canal at BUILD time against the KK donor rig's bone arrangement;
+        // the KKS rig arranges the same-named bones slightly differently, so the skinned mesh comes out
+        // a systematically SHIFTED shape relative to its bones (KK's wearer rig IS the donor rig ⇒ ~0
+        // there). Fix at the single source: once per spawn, with the womb AT REST (not engaged, no
+        // stretch), bake the skinned mesh, measure the real canal entrance/axis, and MOVE the canal
+        // bone onto it. Everything downstream — teal line, seat anchor, depth math, penis_target2 (a
+        // child of this bone; the user's PT2-is-the-target rule stays intact) — corrects together.
         private bool _canalCalibrated;
 
         private void CalibrateCanalToSkinnedMesh()
@@ -479,7 +576,7 @@ namespace LiquidWobbleMPB
             if (!_wearerAnimSearched)
             {
                 _wearerAnimSearched = true;
-                var pr = transform.parent;   // the womb item is instantiated as a CHILD of the wearer.
+                var pr = transform.parent;   // the womb item is instantiated as a CHILD of the wearer
                 if (pr != null) _wearerAnim = pr.GetComponentInChildren<Animator>();
                 if (_wearerAnim == null)
                     LiquidWobbleMPBPlugin._logger?.LogError("CloXray: phase-locked calibration needs the wearer's Animator and none was found — NOT calibrating (no fallback).");
@@ -491,7 +588,7 @@ namespace LiquidWobbleMPB
             if (_calPrevFrac >= 0f)
             {
                 if (frac >= _calPrevFrac) crossed = (_calPrevFrac < CalPhase && frac >= CalPhase);
-                else crossed = (CalPhase >= _calPrevFrac || CalPhase < frac);   // wrapped past 1.0.
+                else crossed = (CalPhase >= _calPrevFrac || CalPhase < frac);   // wrapped past 1.0
             }
             _calPrevFrac = frac;
             if (!crossed) return;
@@ -541,13 +638,18 @@ namespace LiquidWobbleMPB
                     _calSumDia += Mathf.Max(uMax - uMin, wMax - wMin) * 1000f; _calDiaN++;
                 }
                 _calSumEnt += meL; _calSumTop += mtL; _calN++;
-                if (_calN < CalLoops) return;   // need one stance-matched bake per animation loop.
+                if (_calN < CalLoops) return;   // need one stance-matched bake per animation loop
 
                 // window complete: apply the idle-phase-free MEANS, exactly once.
                 meL = _calSumEnt / _calN; mtL = _calSumTop / _calN;
                 Vector3 me = m.MultiplyPoint3x4(meL), mt = m.MultiplyPoint3x4(mtL);
                 Vector3 meshAxis = (mt - me).normalized;
-                _bakedCanalLen = (mt - me).magnitude;
+                _bakedCanalLen = (mt - me).magnitude;   // b561: the TRUE world canal length, idle-averaged
+                // b674: do NOT seed openEff from the calibration's REST diameter — it's the narrow rest
+                // width, not the DRIVEN mm-per-girthScale response (~2x larger), so it made girthScale spike
+                // ~2x at first contact (canal ballooned) and the driven measure then LERPED it back over
+                // ~4-5s = the user's "canal extra big then reduced its size". openEff now comes ONLY from
+                // driven measures (carried across spawns via s_carryEff); RefGirth covers the first contact.
                 _canalCalibrated = true;
                 float formulaRest =
 #if KKS
@@ -589,7 +691,11 @@ namespace LiquidWobbleMPB
                     + (moved ? "BONE MOVED onto the skinned canal" : "bone already matched")
                     + " | bakedCanal=" + (_bakedCanalLen * 1000f).ToString("F1") + "mm openEff=" + _openEfficiency.ToString("F1") + "mm/unit"
                     + " (phase-locked @" + CalPhase.ToString("F2") + " x" + CalLoops + " loops)");
-                PredictParity();
+                PredictParity();   // b627: one-shot analytic prediction, logged beside the loop's result
+                // b541: PT2 onto the calibrated axis. penis_target2 was authored at the old penis_target's
+                // rest position (a hair FRONT of the canal top); PT2 is the aim, so a lateral authorship
+                // offset drags the penis toward that wall at depth. Runtime BONE calibration (allowed):
+                // keep its depth along the axis, zero its lateral offset.
                 if (_ptBone == null) _ptBone = FindPenisTargetBone();
                 if (_ptBone != null)
                 {
@@ -604,11 +710,17 @@ namespace LiquidWobbleMPB
             {
                 LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: canal calibration failed: " + e.Message);
                 _canalCalibrated = false;
-                _calN = 0; _calSumEnt = Vector3.zero; _calSumTop = Vector3.zero; _calSumDia = 0f; _calDiaN = 0; _calPrevFrac = -1f;   // restart the window.
+                _calN = 0; _calSumEnt = Vector3.zero; _calSumTop = Vector3.zero; _calSumDia = 0f; _calDiaN = 0; _calPrevFrac = -1f;   // restart the window
             }
         }
-        private const float CalPhase = 0.25f;   // fixed normalized phase, identical everywhere.
-        private const int CalLoops = 2;   // one bake per animation loop, averaged.
+        // b624 PHASE-LOCKED calibration (user's idea: "catch the loop, measure at the same frame each
+        // time"). The idle animation is LOOPED, so sampling at one fixed normalized phase sees the SAME
+        // stance every time — stance shifts stop being noise by construction (b618's time-window average
+        // could not fix this: stance switching is state noise, not zero-mean sway; each spawn's window
+        // caught a different stance mix and the bone landed ±5mm differently). CalPhase is one global
+        // constant so every spawn, BOTH modes, target and verify are all stance-matched to each other.
+        private const float CalPhase = 0.25f;   // fixed normalized phase, identical everywhere
+        private const int CalLoops = 2;         // one bake per animation loop, averaged
         private Animator _wearerAnim; private bool _wearerAnimSearched;
         private float _calPrevFrac = -1f;
         private int _calN, _calDiaN;
@@ -644,10 +756,10 @@ namespace LiquidWobbleMPB
                 mr.sharedMaterial = m;
                 _modeDot.hideFlags = HideFlags.HideAndDontSave;
                 if (_smr != null) _modeDot.layer = _smr.gameObject.layer;
-                _modeDotCol = new Color(0, 0, 0, 0);   // force the first colour stamp.
+                _modeDotCol = new Color(0, 0, 0, 0);   // force the first colour stamp
             }
             if (col != _modeDotCol)
-            {   // Internal-Colored multiplies VERTEX colour; a primitive has none.
+            {   // Internal-Colored multiplies VERTEX colour; a primitive has none — stamp it into the mesh
                 _modeDotCol = col;
                 var mf = _modeDot.GetComponent<MeshFilter>();
                 var mesh2 = mf.mesh; mesh2.hideFlags = HideFlags.HideAndDontSave;
@@ -673,7 +785,7 @@ namespace LiquidWobbleMPB
                 var mesh = _smr.sharedMesh;
                 var verts = mesh.vertices;
                 var bw = mesh.boneWeights;
-                var bones = _smr.bones;   // in REBIND these ARE her transforms.
+                var bones = _smr.bones;   // in REBIND these ARE her transforms
                 if (bw == null || bw.Length != verts.Length || bones == null) return;
                 float s = MainGameWomb.RebindS;
                 Vector3 pivotW = pivot.position;
@@ -686,9 +798,13 @@ namespace LiquidWobbleMPB
                     var b = bones[j];
                     if (b == null) { mir[j] = Matrix4x4.identity; reb[j] = Matrix4x4.identity; continue; }
                     Vector3 ls = b.lossyScale;
-                    // cf_s_leg_L/R HER natural scale (localScale = c.localScale.
-                    bool frozenHelper = b.name == "cf_s_waist01" || b.name == "cf_s_waist02"
-                                     || b.name == "cf_s_leg_L" || b.name == "cf_s_leg_R";
+                    // b632 FROZEN-HELPER EXCEPTION: SyncNow's follow loop gives cf_s_waist01/02 and
+                    // cf_s_leg_L/R HER natural scale (localScale = c.localScale — never ×s), only their
+                    // POSITIONS are pivot-scaled. This is the measured mirror law's mechanism (girth ×1)
+                    // and the first predictor run missed exactly its share: y off by ~7mm with z correct.
+                    string hb = MainGameWomb.HerNameFor(b.name);   // womb bone -> her equivalent role
+                    bool frozenHelper = hb == "cf_s_waist01" || hb == "cf_s_waist02"
+                                     || hb == "cf_s_leg_L" || hb == "cf_s_leg_R";
                     Vector3 mls = frozenHelper ? ls : ls * s;
                     mir[j] = Matrix4x4.TRS(pivotW + s * (b.position - pivotW) + seatW, b.rotation, mls) * bpO[j];
                     reb[j] = b.localToWorldMatrix * bpO[j] * MainGameWomb.RebindM0;
@@ -707,8 +823,9 @@ namespace LiquidWobbleMPB
                     sumM += pm; sumR += pr; cnt++;
                 }
                 if (cnt == 0) return;
-                Vector3 dW = (sumM - sumR) / cnt;   // world: mirror − rebind(nudge-free).
-                Vector3 dHer = Quaternion.Inverse(pivot.rotation) * dW * 1000f;   // her-frame world mm (nudge convention).
+                Vector3 dW = (sumM - sumR) / cnt;                    // world: mirror − rebind(nudge-free)
+                Vector3 dHer = Quaternion.Inverse(pivot.rotation) * dW * 1000f;   // her-frame world mm (nudge convention)
+                // b665: publish for AutoPlacePredicted (one-shot placement, no loop). x never commanded.
                 MainGameWomb.PredictedNudgeMM = new Vector3(0f, dHer.y, dHer.z);
                 MainGameWomb.PredictedValid = true;
                 LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: PREDICT parity nudge=(" + dHer.x.ToString("F1") + ", " + dHer.y.ToString("F1") + ", " + dHer.z.ToString("F1")
@@ -768,12 +885,22 @@ namespace LiquidWobbleMPB
                         if (pw < wMin) wMin = pw; if (pw > wMax) wMax = pw;
                     }
                     float canalDiaMM = Mathf.Max(uMax - uMin, wMax - wMin) * 1000f;
-                    float eff = canalDiaMM / _lastGirthScale;   // mm diameter per girthScale unit (mesh property).
+                    float eff = canalDiaMM / _lastGirthScale;   // mm diameter per girthScale unit (mesh property)
+                    // b634: SNAP to the first live measurement of this spawn — the carried/seeded value
+                    // can be stale (other mode, other bake, other girl) and the 0.5 lerp took seconds to
+                    // converge ("channel still took time to adjust to size"). Later samples smooth noise.
+                    // b676: openEff is fine-tuned here but SEEDED from the scale law in the drive (it's a
+                    // mesh constant × the womb's world-scale), so girthScale is right from frame 1. This
+                    // measure must REJECT the ring-ramp TRANSIENT: right after contact the smoothed ring is
+                    // still opening, so canalDiaMM (hence eff) reads far too low (~16 vs the settled ~43) —
+                    // b674/b675 snapped/lerped onto exactly that garbage and the canal ballooned crawling
+                    // back up. Accept eff only within a plausible band of the current (seeded) openEff: the
+                    // settled value sits in-band, the transient lows fall out. Penetrated-only; slow lerp.
                     if (MainGameWomb.HPenetrated && _openEfficiency > 1e-3f
                         && eff > _openEfficiency * 0.6f && eff < _openEfficiency * 1.7f)
                     {
                         _openEfficiency = Mathf.Lerp(_openEfficiency, eff, 0.35f);
-                        s_carryEff = _openEfficiency;
+                        s_carryEff = _openEfficiency;   // b632 carry (in-band, driven values only)
                     }
                 }
             }
@@ -782,7 +909,7 @@ namespace LiquidWobbleMPB
 
         private int[] _bandEnt, _bandTop, _bandMid;
         private Mesh _probeMesh;
-        private Vector3 _shSumE, _shSumM, _shSumT; private int _shN;
+        private Vector3 _shSumE, _shSumM, _shSumT; private int _shN;   // b620 SHAPE probe accumulators
 
         private static int[] BandVerts(Vector3[] v, Vector3 c, Vector3 axis)
         {
@@ -842,9 +969,15 @@ namespace LiquidWobbleMPB
             return u * ((uMin + uMax) * 0.5f) + w * ((wMin + wMax) * 0.5f) + axis * (aSum / band.Length);
         }
 
-        // Re-project the cached LOCAL (rest) canal centres through the womb's CURRENT (post-IK) transform.
-        private bool _offCanalWarned;   // the paired penis runs beside the canal, not through.
-        private bool _canalMarkerWarned;   // the canal marker disagreed with the mesh and was dropped.
+        // Re-project the cached LOCAL (rest) canal centres through the womb's CURRENT (post-IK) transform. Cheap, runs
+        // every frame so the canal tracks the womb without a per-frame bake. SHAPE is from the rest bake (stable, no
+        // penetration-deformation feedback); POSITION is live. Keeps _canalEntrance/_canalAxis/_canalLen + the markers
+        // in sync with where the womb actually renders.
+        // A rejected canal measurement used to be silent, and everything downstream (pairing, depth,
+        // the collider path) is gated on a valid canal - so the womb simply stopped reacting with no
+        // explanation. Reported once per womb.
+        private bool _offCanalWarned;      // the paired penis runs beside the canal, not through it
+        private bool _canalMarkerWarned;   // the canal marker disagreed with the mesh and was dropped
         private bool _canalRejectWarned;
         private void ReportCanalRejected(float measured, float scale)
         {
@@ -886,7 +1019,7 @@ namespace LiquidWobbleMPB
             _canalAxis = _canalBone.up;
             _canalLen = lenB;
             if (_canalBandW == null || _canalBandW.Length < 2) _canalBandW = new Vector3[2];
-            _canalBandW[0] = _canalEntrance;   // endpoints from the BONE.
+            _canalBandW[0] = _canalEntrance;                                        // endpoints from the BONE
             _canalBandW[_canalBandW.Length - 1] = _canalEntrance + _canalAxis * _canalLen;
 
             // H BASE CANAL STRETCH: a resting womb_displace elongates the whole womb.
@@ -940,7 +1073,7 @@ namespace LiquidWobbleMPB
         private const float VaginaRescanFallback = 30f;
         private static Transform[] _vaginaRootCache;
         private static float _vaginaRootStamp = -100f;
-        public static void InvalidateVaginaRoots() { _vaginaRootStamp = -1000f; }   // force a rescan next access (a character spawned/despawned).
+        public static void InvalidateVaginaRoots() { _vaginaRootStamp = -1000f; }   // force a rescan next access (a character spawned/despawned)
         private static Transform[] VaginaRoots()
         {
             if (_vaginaRootCache != null && Time.unscaledTime - _vaginaRootStamp < VaginaRescanFallback) return _vaginaRootCache;
@@ -980,7 +1113,7 @@ namespace LiquidWobbleMPB
             if (_canalLen <= 1e-4f) return false;
             Vector3 rel = worldPoint - _canalEntrance;
             float along = Vector3.Dot(rel, _canalAxis);
-            foot = _canalEntrance + _canalAxis * along;   // on the centerline, same depth.
+            foot = _canalEntrance + _canalAxis * along;   // on the centerline, same depth
             return true;
         }
 
@@ -999,9 +1132,15 @@ namespace LiquidWobbleMPB
             return true;
         }
 
-        // Deepest point of the penis SHAFT (the whole cm_j_dan bone chain) that lies inside this womb's
-        // canal/bulb.
-        private readonly Vector3[] _aimBuf = new Vector3[1];   // reusable 1-point buffer for the aimed-tip containment test.
+        // Deepest point of the penis SHAFT (the whole cm_j_dan bone chain) that lies inside this womb's canal/bulb.
+        // Replaces the single-tip test, which broke once BP bends the penis fully: the geometric TIP can curl back
+        // OUT (below/beside the womb) while the shaft still threads it. We scan every shaft bone and keep the one
+        // with the greatest along-canal depth whose lateral offset is within a DEPTH-SCALED womb radius — narrow
+        // (~girth) at the entrance, widening to the bulb half-width deep in. The bulb radius comes from the REST
+        // mesh extents mapped to world (oriented with the womb, so a tilted womb doesn't inflate it the way the
+        // world AABB does). Rejects a penis lying BESIDE the womb (every bone beyond the radius) and a withdrawn
+        // one (deepest contained bone shallow). Sets _bpLateral for the debug line (closest approach when missed).
+        private readonly Vector3[] _aimBuf = new Vector3[1];   // reusable 1-point buffer for the aimed-tip containment test
 
         // Penis WORLD girth radius at a given distance BACK FROM THE TIP (world metres), from BP's
         // per-collider girth profile.
@@ -1013,7 +1152,7 @@ namespace LiquidWobbleMPB
             float nearR = -1f, nearD = float.PositiveInfinity;
             for (int k = 0; k < gp.Length; k++)
             {
-                float d = (gp[k] - _bp.tipPos).magnitude;   // this collider's distance from the penis tip (along the shaft).
+                float d = (gp[k] - _bp.tipPos).magnitude;   // this collider's distance from the penis tip (along the shaft)
                 float r = gr[k];
                 float diff = Mathf.Abs(d - distFromTip);
                 if (diff < nearD) { nearD = diff; nearR = r; }
@@ -1022,7 +1161,7 @@ namespace LiquidWobbleMPB
             }
             if (belowR >= 0f && aboveR >= 0f && aboveD > belowD + 1e-6f)
                 return Mathf.Lerp(belowR, aboveR, (distFromTip - belowD) / (aboveD - belowD));
-            return nearR;   // outside the profile span -> clamp to the nearest end.
+            return nearR;   // outside the profile span -> clamp to the nearest end
         }
 
         // The womb's half-width (bulb radius) in world units, from the REST mesh extents (oriented with the
@@ -1044,9 +1183,9 @@ namespace LiquidWobbleMPB
             if (pts == null || count <= 0) return false;
             EnsureCanal();
             if (_canalLen <= 1e-4f) return false;
-            float bulbR = WombBulbRadius();   // womb half-width in world units.
+            float bulbR = WombBulbRadius();   // womb half-width in world units
             if (bulbR < w) bulbR = w;
-            bulbR *= _sens;   // per-womb penetration sensitivity (1.0 = default; <1 tighter / >1 looser).
+            bulbR *= _sens;                   // per-womb penetration sensitivity (1.0 = default; <1 tighter / >1 looser)
             bool any = false; float bestAlong = float.NegativeInfinity, bestLat = -1f, minLat = float.PositiveInfinity;
             for (int k = 0; k < count; k++)
             {
@@ -1054,9 +1193,11 @@ namespace LiquidWobbleMPB
                 float a = Vector3.Dot(rel, _canalAxis);
                 float l = (rel - a * _canalAxis).magnitude;
                 if (l < minLat) minLat = l;
-                if (a < -w) continue;   // behind the entrance.
-                // FLAT womb half-width (same as the collider path, build 367).
-                if (l > bulbR) continue;   // beside the womb, not threading.
+                if (a < -w) continue;                                                  // behind the entrance
+                // FLAT womb half-width (same as the collider path, build 367) — a depth-scaled gate is too strict at
+                // shallow depth for a womb the user placed OFF the penis path (the shaft then reads off-axis at every
+                // depth). "Inside the womb's half-width" is the real test; bulbR rotates with the womb (orientation-OK).
+                if (l > bulbR) continue;                                               // beside the womb, not threading it
                 if (a > bestAlong) { bestAlong = a; bestLat = l; any = true; }
             }
             if (!any) { _bpClosest = (minLat < float.PositiveInfinity) ? minLat : -1f; return false; }
@@ -1065,9 +1206,12 @@ namespace LiquidWobbleMPB
         }
 
         private float _routeBReportAt = -1f; private bool _routeBReported;
-        private string _lastCanalCam = "-"; private bool _lastCanalCamVisible;
-        private float _orbitNext;
-        // ±0.2-0.5mm relative to her pelvis, so any single-frame sample carries idle-phase noise.
+        private string _lastCanalCam = "-"; private bool _lastCanalCamVisible;   // b605 camera-dependence probe
+        private float _orbitNext;   // b608 camera-orbit probe throttle
+        // b612 IDLE-AVERAGED placement: her idle loop flexes the waist/leg bones, deforming the skinned
+        // tube ±0.2-0.5mm relative to her pelvis, so any single-frame sample carries idle-phase noise.
+        // Accumulate entInHer EVERY frame and emit mean ± spread per 5s window (several idle cycles) —
+        // the mean is the phase-free placement, the spread quantifies the idle wobble itself.
         private Vector3 _avgSum, _avgMin, _avgMax, _avgAxisSum; private int _avgN; private float _avgEnd = -1f;
         // jump, which may have contaminated earlier readings.
         private static bool s_gameFocused = true; private static int s_focusEvents;
@@ -1082,9 +1226,9 @@ namespace LiquidWobbleMPB
         private void LateUpdate()
         {
             if (!_ready) return;
-            if (!LiquidWobbleMPBPlugin.CfgEnabled) return;   // master toggle OFF -> freeze: stop driving ring/stretch/mound weights (they stay latched).
+            if (!LiquidWobbleMPBPlugin.CfgEnabled) return;     // master toggle OFF -> freeze: stop driving ring/stretch/mound weights (they stay latched)
 
-            UpdateModeDot();
+            UpdateModeDot();   // b628: cyan = MIRROR entrance, orange = mirror target under REBIND
 
             // canal axis / her forward / lateral.
             if (LiquidWobbleMPBPlugin.CfgDebugLog && HasPenisRef && MainGameWomb.HPenetrated
@@ -1140,8 +1284,8 @@ namespace LiquidWobbleMPB
                 _orbitNext = Time.unscaledTime + 0.5f;
                 Transform par = _canalBone.parent;
                 Camera mc = Camera.main;
-                Vector3 entInHer = par.InverseTransformPoint(_canalEntrance) * 1000f;   // mm, pelvis frame.
-                Vector3 axisInHer = par.InverseTransformDirection(_canalAxis);   // unit, pelvis frame.
+                Vector3 entInHer = par.InverseTransformPoint(_canalEntrance) * 1000f;      // mm, pelvis frame
+                Vector3 axisInHer = par.InverseTransformDirection(_canalAxis);             // unit, pelvis frame
                 LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: ORBIT mode=" + (MainGameWomb.CurrentlyRebound ? "REBIND" : "MIRROR")
                     + " camPos=" + (mc != null ? mc.transform.position.ToString("F2") : "-")
                     + " camFwd=" + (mc != null ? mc.transform.forward.ToString("F2") : "-")
@@ -1216,7 +1360,7 @@ namespace LiquidWobbleMPB
                     int kx = -1;
                     if (bonesX != null)
                         for (int i = 0; i < bonesX.Length; i++)
-                            if (bonesX[i] != null && bonesX[i].name == "cf_j_kokan") { kx = i; break; }
+                            if (bonesX[i] != null && MainGameWomb.HerNameFor(bonesX[i].name) == "cf_j_kokan") { kx = i; break; }
                     if (kx >= 0 && bindX != null && kx < bindX.Length && _canalLocal != null && _canalLocal.Length >= 2)
                     {
                         Matrix4x4 m2w = bonesX[kx].localToWorldMatrix * bindX[kx];
@@ -1298,9 +1442,10 @@ namespace LiquidWobbleMPB
             }
             _handoffLogged = false;
 
-            // Depth + girth from BP - from the penis nearest THIS womb's entrance (TryReadNear), not the
-            // globally deepest one.
-            _bpGeomDepth = false;   // cleared before this frame's decision so it reflects this frame's decision.
+            // Depth + girth from BP — from the penis nearest THIS womb's entrance (TryReadNear),
+            // not the globally deepest one: several wombs in a scene each pair with their own
+            // penis instead of all reacting to one.
+            _bpGeomDepth = false;   // cleared before this frame's decision so it reflects this frame's decision
             bool engaged = false;
             float girthScale = 1f;
             float lengthScale = 1f;
@@ -1308,8 +1453,15 @@ namespace LiquidWobbleMPB
             _bpLateral = -1f; _bpVaginaMain = false; _tipDetached = false; _tipDist = -1f; _vaginaFarLat = false;
             _entryDetached = false; _entryLat = -1f;
             EnsureVaginaPairing();   // cached 2s: is this womb seated on a cf_J_Vagina_root?
-            // The womb<->penis pairing is decided in OnPreCullCanal.
-            _bpHadGirthThisFrame = false;
+            // The womb<->penis pairing is decided in OnPreCullCanal — POST-NodesConstraints — so k_f_dan_entry is read at
+            // its DRIVEN position (at the vagina/anus), not the penis-rig default. Here we just read the chosen penis.
+            _bpHadGirthThisFrame = false;   // b666: reset each frame; set below if BP reports a real girth
+            // b671 read the penis girth at SPAWN, before penetration. BP's girth is the male's
+            // STATIC penis-collider radii, present from character load — so once the canal is known we
+            // find the positioned penetrator (nearest male, generous range) and latch its girth NOW,
+            // instead of waiting for the entry marker to reach the canal (penetration). Runs only until
+            // latched (s_bpDiaMM>0) and only while not yet paired — then the paired-read below owns it,
+            // and the rise-at-limit corrects upward if it differs under compression.
             if (s_bpDiaMM <= 0f && _canalLen > 1e-4f && !MainGameWomb.IsStudio)
             {
                 string preMale = BPBridge.FindNearestMaleName(_canalEntrance, 0.50f, Wearer());
@@ -1370,7 +1522,7 @@ namespace LiquidWobbleMPB
                 {
                     engaged = true;
                     targetNorm = (FullDepthIn > 1e-4f) ? _bp.visualDepth / FullDepthIn : _bp.visualDepth;
-                    _bpVaginaMain = !contained;   // diag: reacting from BP/vagina alone - the bones never threaded the canal.
+                    _bpVaginaMain = !contained;   // diag: reacting from BP/vagina alone — the bones never threaded the canal
                 }
                 // BetterPenetration only reports depth for an orifice it recognises.
                 else if (MainGameWomb.IsStudio && !engaged && contained && _bp.found && _bp.hasPose && _canalLen > 1e-4f && tipAttached && entryAttached)
@@ -1388,15 +1540,18 @@ namespace LiquidWobbleMPB
                         if (ln.sqrMagnitude > 1e-6f)
                         {
                             canalDir = ln.normalized;
-                            measureFrom = bpEntry;   // the entry marker sits on the canal mouth by constraint.
+                            measureFrom = bpEntry;   // the entry marker sits on the canal mouth by constraint
                             onBpLine = true;
                         }
                     }
                     Vector3 trel = _bp.tipPos - measureFrom;
                     float tAlong = Vector3.Dot(trel, canalDir);
                     float tLat = (trel - canalDir * tAlong).magnitude;
-                    // tipPos is the deepest shaft BONE, and the rendered glans reaches well past.
-                    float surf = tAlong + _bp.girthTip;   // bone + tip radius, until the colliders say better.
+                    // tipPos is the deepest shaft BONE, and the rendered glans reaches well past it. Walk the
+                    // shaft colliders instead and take the deepest SURFACE point along the canal (centre plus
+                    // its own radius) - the same measure the toy/collider path uses, so a ring opens as the
+                    // penis actually arrives at it rather than once it has already gone through.
+                    float surf = tAlong + _bp.girthTip;   // bone + tip radius, until the colliders say better
                     if (_bp.girthPos != null && _bp.girthRad != null)
                     {
                         int gn = Mathf.Min(_bp.girthPos.Length, _bp.girthRad.Length);
@@ -1425,7 +1580,7 @@ namespace LiquidWobbleMPB
                     {
                         engaged = true;
                         targetNorm = tNorm;
-                        _bpGeomDepth = true;   // diag: depth measured from the tip, not from BP compression.
+                        _bpGeomDepth = true;   // diag: depth measured from the tip, not from BP compression
                     }
                 }
                 if (engaged)
@@ -1459,17 +1614,19 @@ namespace LiquidWobbleMPB
                                                         _ringDepths, _colRingRadius,
                                                         out ctip, out cbase, out crad, out cdrive, out clat, out cname))
                     {
-                        float cdepth = cdrive / _canalLen;   // 0 entrance .. 1 top (tip-based when name-targeted; can overshoot).
+                        float cdepth = cdrive / _canalLen;   // 0 entrance .. 1 top (tip-based when name-targeted; can overshoot)
                         _colLateral = clat; _colName = cname;
-                        if (cdepth > EngageEps && cdepth > targetNorm)   // only take over when the toy reaches DEEPER than the penis.
+                        if (cdepth > EngageEps && cdepth > targetNorm)   // only take over when the toy reaches DEEPER than the penis
                         {
                             engaged    = true;
                             targetNorm = cdepth;
                             girthScale = (RefGirth > 1e-5f) ? Mathf.Clamp(crad / RefGirth, 0.4f, MaxGirthScale) : 1f;
                             lengthScale = 1f;
-                            // Per-ring radii are a STUDIO feature: in H the colliders slide with the hips in
-                            // bent poses (reverse cowgirl), and the "thickest collider at this ring's depth" picks up random passers-by - the top ring visibly popped open at random.
-                            _colPerRing = MainGameWomb.IsStudio;   // _colRingRadius[] holds the per-ring thickest collider -> ring loop uses.
+                            // Per-ring radii are a STUDIO feature: in H the colliders slide with the
+                            // hips in bent poses (reverse cowgirl), and the "thickest collider at this
+                            // ring's depth" picks up random passers-by — the top ring visibly popped
+                            // open at random. H uses the stable uniform tip girth instead.
+                            _colPerRing = MainGameWomb.IsStudio;   // _colRingRadius[] holds the per-ring thickest collider -> ring loop uses it
                             _bp = new BPBridge.Reading {
                                 found = true, depth = cdepth, visualDepth = cdepth,
                                 girthBase = crad, girthTip = crad, girthFactor = 1f, baseLen = 0f,
@@ -1576,7 +1733,7 @@ namespace LiquidWobbleMPB
                 }
             }
 
-            _dbgEngaged = engaged;   // engagement state (IsEngaged); gates calibration + the mesh reaction.
+            _dbgEngaged = engaged;   // engagement state (IsEngaged); gates calibration + the mesh reaction
 
             // Rise fast (DepthSmoothing), FALL slow (CloseSmoothing) so the depth lingers on withdrawal ->
             // the rings close LATER (follow-through), while opening still tracks the penis going.
@@ -1598,8 +1755,8 @@ namespace LiquidWobbleMPB
             }
             else _hIntentDepth = 0f;
 
-            float closeK    = 1f - Mathf.Exp(-Time.deltaTime / Mathf.Max(dampTime, 0.02f));   // close = exponential ease-OUT (decelerates smoothly to target, never an instant snap).
-            float openStep  = (100f / Mathf.Max(OpenTime, 0.01f)) * Time.deltaTime;   // open rate (eases in, not instant).
+            float closeK    = 1f - Mathf.Exp(-Time.deltaTime / Mathf.Max(dampTime, 0.02f));  // close = exponential ease-OUT (decelerates smoothly to target, never an instant snap)
+            float openStep  = (100f / Mathf.Max(OpenTime, 0.01f)) * Time.deltaTime; // open rate (eases in, not instant)
 
             int n = _ringIdx.Length;
             for (int i = 0; i < n; i++)
@@ -1618,8 +1775,11 @@ namespace LiquidWobbleMPB
                 {
                     ringGScale = Mathf.Clamp(_colRingRadius[i] / RefGirth, 0.4f, MaxGirthScale);
                 }
-                float baseW = Mathf.Min((i == 0 ? EntranceWeight : (i == n - 1 ? CervixWeight : RingWeight)) * ringGScale, Mathf.Min(MaxRingWeight, 100f));   // never exceed 100 (KKPE latches a >100 blendshape write).
-                // Body rings (V2..V5) reach full AHEAD by OpenLead as the tip passes them.
+                float baseW = Mathf.Min((i == 0 ? EntranceWeight : (i == n - 1 ? CervixWeight : RingWeight)) * ringGScale, Mathf.Min(MaxRingWeight, 100f));   // never exceed 100 (KKPE latches a >100 blendshape write)
+                // Body rings (V2..V5) reach full AHEAD by OpenLead as the tip passes them. The ENTRANCE (V1)
+                // is special: it opens GRADUALLY from depth 0 (the moment the tip enters) over EntranceOpenWidth,
+                // so it shows intermediate states during shallow insertion instead of snapping fully open the
+                // instant the tip touches it (its old anticipation window sat below depth 0 -> ~full by 0.04).
                 float target;
                 if (!engaged) target = 0f;
                 else if (i == 0) target = Mathf.SmoothStep(0f, 1f, _depth / Mathf.Max(EntranceOpenWidth, 1e-4f)) * baseW;
@@ -1631,8 +1791,8 @@ namespace LiquidWobbleMPB
                 if (target >= _ringReaction[i]) _ringReaction[i] = Mathf.MoveTowards(_ringReaction[i], target, ringOpenStep);
                 else                            _ringReaction[i] = Mathf.Lerp(_ringReaction[i], target, ringCloseK);
 
-                // Override.
-                _smr.SetBlendShapeWeight(_ringIdx[i], Mathf.Clamp(_ringReaction[i] * strength, 0f, 100f));   // never write >100 (it latches/sticks in KKPE).
+                // Override (strength scales the reaction; manual is only honoured at strength 0 above).
+                _smr.SetBlendShapeWeight(_ringIdx[i], Mathf.Clamp(_ringReaction[i] * strength, 0f, 100f));   // never write >100 (it latches/sticks in KKPE)
             }
 
             if (_stretchIdx >= 0)
@@ -1659,14 +1819,21 @@ namespace LiquidWobbleMPB
                             // the COMPRESSION BP's squish absorbed (raw L−d2−canal, fed by the pin).
                             const float EarlyMM = 7f;
                             float cmp = ExternalCompressMM;
-                            float onsetMM = _canalLen * 1000f - EarlyMM;   // cervix minus early-onset.
+                            // b669: BASELINE-SUBTRACTED stroke term (replaces b650's blunt suppression,
+                            // which killed the LEGITIMATE deep-stroke dome push on a floored penis whose
+                            // tip strokes from BELOW to ABOVE the cervix). Track the shallow-end tip depth
+                            // (min, slow-decay) as the parked baseline: a floored penis PARKED past the
+                            // cervix has a high baseline => ~0 net (no false constant displace, the b650
+                            // problem); a real stroke that dips below the cervix has ~0 baseline => the
+                            // full overshoot drives the dome (this char: tip 63→93 on an 89mm canal).
+                            float onsetMM = _canalLen * 1000f - EarlyMM;   // cervix minus early-onset
                             float tipMM = ExternalStrokeMM;
                             _tipMinMM = (_tipMinMM <= 0f || tipMM < _tipMinMM) ? tipMM : Mathf.Min(tipMM, _tipMinMM + 25f * Time.deltaTime);
                             float baselineMM = Mathf.Max(_tipMinMM - onsetMM, 0f);
                             float strokeOver = Mathf.Max(0f, tipMM - onsetMM - baselineMM);
                             float overMM = Mathf.Max(strokeOver,
                                                      cmp > 0f ? cmp + EarlyMM * Mathf.Clamp01(cmp / EarlyMM) : 0f);
-                            _hOnset = _canalLen * 1000f; _hStrokeMax = ExternalStrokeMM;   // (diag).
+                            _hOnset = _canalLen * 1000f; _hStrokeMax = ExternalStrokeMM;   // (diag)
                             contact = Mathf.Clamp(overMM / DisplaceTravelMM * 100f * LiquidWobbleMPBPlugin.CfgHWombPush, 0f, 100f);
                         }
                         else if (ExternalStrokeMM > 0f)
@@ -1677,7 +1844,7 @@ namespace LiquidWobbleMPB
                             float span = Mathf.Max(_hStrokeMax - _hOnset, 3f);
                             contact = Mathf.Clamp01((ExternalStrokeMM - _hOnset) / span) * LiquidWobbleMPBPlugin.CfgHPressGain;
                         }
-                        else contact = Mathf.Clamp01(ExternalPress) * LiquidWobbleMPBPlugin.CfgHPressGain;   // no-BP-agent fallback.
+                        else contact = Mathf.Clamp01(ExternalPress) * LiquidWobbleMPBPlugin.CfgHPressGain;   // no-BP-agent fallback
                     }
                     st = Mathf.Clamp(baseW + contact, 0f, 100f);
                     if (!ExternalFitLocked) st = Mathf.Min(st, baseW);
@@ -1687,7 +1854,7 @@ namespace LiquidWobbleMPB
                 }
                 if (MainGameWomb.IsStudio)
                 {
-                    if (st >= _stretchReaction) _stretchReaction = st;   // Studio: rise-instant, fall-slow (follow-through).
+                    if (st >= _stretchReaction) _stretchReaction = st;                     // Studio: rise-instant, fall-slow (follow-through)
                     else _stretchReaction = Mathf.Lerp(_stretchReaction, st, closeK);
                 }
                 else
@@ -1709,12 +1876,14 @@ namespace LiquidWobbleMPB
                     Vector3 lat = _bp.tipDir - Vector3.Dot(_bp.tipDir, _canalAxis) * _canalAxis;
                     if (lat.sqrMagnitude > 1e-8f)
                     {
-                        // NEGATED vs build 380: in-game both axes (L/R and F/B) leaned the wrong way, so
-                        // flip the local lateral to lean TOWARD the penis.
-                        Vector3 ld = -_smr.transform.InverseTransformDirection(lat);   // womb-local lean dir, sign-corrected.
+                        // NEGATED vs build 380: in-game BOTH axes (L/R and F/B) leaned the WRONG way, so flip the local
+                        // lateral to lean TOWARD the penis. Then sqrt() shapes the response so even a SMALL off-axis angle
+                        // already gives a clear lean (reacts FAST), easing toward the DirReactWeight ceiling so it "grows
+                        // lower" overall — lower the 'Direction reaction' cfg for a smaller max.
+                        Vector3 ld = -_smr.transform.InverseTransformDirection(lat);   // womb-local lean dir, sign-corrected
                         float lz = Mathf.Clamp(ld.z * 3f, -1f, 1f);
                         float lx = Mathf.Clamp(ld.x * 3f, -1f, 1f);
-                        const float sideScale = 0.5f;
+                        const float sideScale = 0.5f;   // L/R lean = HALF of fwd/back (per the human — sideways lean was too strong)
                         fwd   = Mathf.Sqrt(Mathf.Max(0f,  lz)) * DirReactWeight;              back  = Mathf.Sqrt(Mathf.Max(0f, -lz)) * DirReactWeight;
                         right = Mathf.Sqrt(Mathf.Max(0f,  lx)) * DirReactWeight * sideScale;  left  = Mathf.Sqrt(Mathf.Max(0f, -lx)) * DirReactWeight * sideScale;
                     }
@@ -1828,7 +1997,7 @@ namespace LiquidWobbleMPB
         {
             if (_entranceBone == null)
                 foreach (var t in GetComponentsInChildren<Transform>(true))
-                    if (t != null && t.name == "cf_j_kokan") { _entranceBone = t; break; }
+                    if (t != null && t.name == MainGameWomb.WombBone("cf_j_kokan")) { _entranceBone = t; break; }
             return _entranceBone != null ? _entranceBone.position : transform.position;
         }
 

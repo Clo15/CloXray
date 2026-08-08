@@ -42,44 +42,58 @@ namespace LiquidWobbleMPB
         private Transform[] _bonesCache;
         private Matrix4x4[] _bindposesCache;
         private MaterialPropertyBlock _block;
-        private Material _liquidMat;   // the cum material (has the fill bounds), for chamber centres.
-        private int _tubeBoneIdx = -1;   // index in _smr.bones of a canal-axis bone (tube centre anchor).
+        private Material _liquidMat;   // the cum material (has the fill bounds), for chamber centres
+        private int _tubeBoneIdx = -1; // index in _smr.bones of a canal-axis bone (tube centre anchor)
         // Bone the tube centre is anchored to for the skinning map (on the canal axis, tube base).
         public string TubeCenterBone { get; set; } = "cf_j_kokan";
-        private int _wombBoneIdx = -1;   // index in _smr.bones of the womb (uterus) bone (womb centre anchor).
-        // Bone the womb centre is anchored to. The womb bulb rides a DIFFERENT bone than the tube, so it
-        // needs its own world anchor (extrapolating from the tube across the neck undershoots ~40%).
+        private int _wombBoneIdx = -1; // index in _smr.bones of the womb (uterus) bone (womb centre anchor)
+        // Bone the womb centre is anchored to. The womb bulb rides a DIFFERENT bone than the tube,
+        // so it needs its own world anchor (extrapolating from the tube across the neck undershoots
+        // ~40%). Default cf_s_waist02 (pelvis bone nearest the bulb); swap to cf_s_waist01 via
+        // ComponentUtil if the fill level reads wrong — resolved live, no restart needed.
         public string WombCenterBone { get; set; } = "cf_s_waist02";
 
         // LIVE per-chamber world-Y extent, measured from the actual skinned+blendshaped cum verts.
-        private int[] _cumVerts;   // vertex indices of submesh 0 (the cum), triangle list (6x duplicated).
-        private int[] _cumVertsUnique;   // DISTINCT submesh-0 vertex indices - what the per-frame extent loop walks.
-        private Vector3[] _restVerts;   // base (rest) vertex positions, object space (cached).
-        private float _extentClock = 999f;   // high => measure on the first LateUpdate.
-        private bool _wombBoneWarned;   // warn once if WombCenterBone isn't found (silent ~40% undershoot otherwise).
+        // The rest box can't see blendshape inflation or per-chamber scale, so fill=1 undershot the
+        // real bulb; the shader places the fill surface by lerping this measured extent
+        // (_Chamber1ExtentY / _Chamber2ExtentY).
+        private int[] _cumVerts;            // vertex indices of submesh 0 (the cum), triangle list (6x duplicated)
+        private int[] _cumVertsUnique;      // DISTINCT submesh-0 vertex indices — what the per-frame extent loop walks
+        private Vector3[] _restVerts;       // base (rest) vertex positions, object space (cached)
+        private float _extentClock = 999f;  // high => measure on the first LateUpdate
+        private bool _wombBoneWarned;       // warn once if WombCenterBone isn't found (silent ~40% undershoot otherwise)
+        // ── STAGE-2 PRECOMPUTED SKINNED BASIS — the ONLY measurement source (see DESIGN_NOTES.md). ──
+        // Skinning is linear and the womb rig is internally rigid, so a cum vert's baked-frame
+        // position is rest + Σ wₛ·deltaₛ with rest/deltaₛ constant, captured ONCE at spawn by
+        // decomposing BakeMesh. A dirty frame is then a ~1.1k-vert weighted sum, not a whole-mesh
+        // CPU skin. The per-frame BakeMesh and the manual-skin fallback are gone; assumption
+        // violations warn loudly (spawn + per-frame rigidity assertions) and keep running.
         private bool        _basisCaptured;
-        private Vector3[]   _basisRest;   // [k over _cumVertsUnique] baked-frame vert, all weights 0, ÷ _basisScale0.
-        private Vector3[][] _basisDelta;   // [shape][k] baked delta at weight 100, ÷ _basisScale0; null = no cum effect.
-        private Vector3     _basisScale0;   // renderer lossyScale at capture (basis stored normalized by it).
-        private Vector3[]   _lpCache;   // [k] last evaluated NORMALIZED baked-frame verts (current weights).
-        private Vector3[]   _rigLocPos;   // per-bone LOCAL pos/rot/scale at capture - the rigidity snapshot.
+        private Vector3[]   _basisRest;     // [k over _cumVertsUnique] baked-frame vert, ALL weights 0, ÷ _basisScale0
+        private Vector3[][] _basisDelta;    // [shape][k] baked delta at weight 100, ÷ _basisScale0; null = no cum effect
+        private Vector3     _basisScale0;   // renderer lossyScale at capture (basis stored normalized by it)
+        private Vector3[]   _lpCache;       // [k] last evaluated NORMALIZED baked-frame verts (current weights)
+        private Vector3[]   _rigLocPos;     // per-bone LOCAL pos/rot/scale at capture — the rigidity snapshot
         private Quaternion[] _rigLocRot;
         private Vector3[]   _rigLocScl;
-        private float       _rigWarnClock;   // throttle: rigidity warning at most every 5s.
-        private bool        _scaleWarned;   // one-time: non-uniform RELATIVE rescale (component model approximate).
-        // Half the 3mm CUM_CHAMBER_GAP (build CUM_CHAMBER_GAP): the rest-Y midpoint of the gap between.
+        private float       _rigWarnClock;  // throttle: rigidity warning at most every 5s
+        private bool        _scaleWarned;   // one-time: non-uniform RELATIVE rescale (component model approximate)
+        // Half the 3mm CUM_CHAMBER_GAP (build CUM_CHAMBER_GAP): the rest-Y midpoint of the gap between the
+        // womb floor and tube ceiling, used to classify a vert into its chamber. Keep in sync with the
+        // shader's CUM_SPLIT_BIAS and the build's CUM_CHAMBER_GAP/2.
         private const float ChamberSplitBias = 0.0015f;
-        // DIAGNOSTIC build stamp - bump every plugin build so the log proves which DLL is live.
-        public const int PluginBuild = 860;   // build stamp - bump every build.
-        // 0 = measure the chamber extents every frame (dirty-gated).
+        // DIAGNOSTIC build stamp — bump every plugin build so the log proves which DLL is live.
+        public const int PluginBuild = 974;   // build stamp — bump every build. Full history: LiquidShaderWobble\CHANGELOG.md
+        // 0 = measure the chamber extents every frame (dirty-gated). Throttling made the fill
+        // plane lag the geometry during rotation; a dirty frame is cheap (basis weighted sum + walk).
         public float ExtentPeriod { get; set; } = 0f;
 
         // ── Cap contact profile (chamber 1/womb) - shader rim-clamp feed ── The cum-wall cross-section,
         // measured in the same walk as the extents.
         private const int ProfH = 16, ProfA = 16;
-        private Vector3[] _profWp;   // scratch: this measurement's chamber-1 world verts.
+        private Vector3[] _profWp;          // scratch: this measurement's chamber-1 world verts
         private int       _profCount;
-        private bool      _profValid;   // true once a measurement has filled the buffers.
+        private bool      _profValid;       // true once a measurement has filled the buffers
         private readonly float[]   _profSumX = new float[ProfH];
         private readonly float[]   _profSumZ = new float[ProfH];
         private readonly int[]     _profCnt  = new int[ProfH];
@@ -90,10 +104,10 @@ namespace LiquidWobbleMPB
 
         private Vector3 _prevPosition;
         private Vector3 _prevEuler;
-        private float _prevDepth;   // last BP penetration depth - thrust-slosh velocity source.
-        private bool  _hasPrevDepth;   // false until the first valid BP read (no spurious first-frame jolt).
-        private float _setupClock = 999f;   // high => read the Material-Editor setup floats on the first frame.
-        private bool  _setupMatWarned;   // warn once if no live material exposes the setup props.
+        private float _prevDepth;       // last BP penetration depth — thrust-slosh velocity source
+        private bool  _hasPrevDepth;    // false until the first valid BP read (no spurious first-frame jolt)
+        private float _setupClock = 999f;  // high => read the Material-Editor setup floats on the first frame
+        private bool  _setupMatWarned;     // warn once if no live material exposes the setup props
 
         // Accumulated sway amplitude per axis; bleeds back to zero over time.
         private float _amplitudeX;
@@ -104,20 +118,21 @@ namespace LiquidWobbleMPB
         // Last world chamber centres (captured when _Box1/2CenterWorld are written) for the thrust proximity
         // gate; the flags say whether this frame produced a valid centre.
         private Vector3 _wombCenterW, _tubeCenterW;
-        private float _fillLogClock;   // debug: throttle for the cum-fill input log.
-        private Vector4 _dbgExt1, _dbgExt2;   // debug: captured chamber world-Y extents.
+        private float _fillLogClock;             // debug: throttle for the cum-fill input log
+        private Vector4 _dbgExt1, _dbgExt2;       // debug: captured chamber world-Y extents
+        // b461 world-frame anchor (see UpdateChamberExtents): bone-delta carries the frame in H.
         private bool _extAnchorCaptured;
         private Transform _extAnchor;
         private Matrix4x4 _extAnchor0Inv, _extBakeM0;
         private Vector3 _extScale0 = Vector3.one;
-        private Vector3 _dbgSkinScale;   // scale from the exact skin matrix (parented-womb-safe source).
+        private Vector3 _dbgSkinScale;            // scale from the exact skin matrix (parented-womb-safe source)
         private bool _haveWombC, _haveTubeC;
-        private Mesh _bakedMesh;   // BakeMesh target - SPAWN-only since build 333 (basis capture + one-time assertion).
-        private System.Collections.Generic.List<Vector3> _bakedVList;   // reused GetVertices buffer (spawn-only).
-        private Matrix4x4[] _sentinelBones;   // bone l2w at last measurement (dirty-check).
-        private float[] _sentinelShapes;   // blendshape weights at last measurement (dirty-check).
-        private Vector3 _dbgBakeC1;   // debug: measured chamber-1 center (world).
-        private Vector3 _dbgV0W;   // plugin world pos of cum vertex tri0[0] (GPU-vs-plugin crosses).
+        private Mesh _bakedMesh;                  // BakeMesh target — SPAWN-ONLY since build 333 (basis capture + one-time assertion)
+        private System.Collections.Generic.List<Vector3> _bakedVList;   // reused GetVertices buffer (spawn-only)
+        private Matrix4x4[] _sentinelBones;       // bone l2w at last measurement (dirty-check)
+        private float[] _sentinelShapes;          // blendshape weights at last measurement (dirty-check)
+        private Vector3 _dbgBakeC1;               // debug: measured chamber-1 center (world)
+        private Vector3 _dbgV0W;                  // plugin world pos of cum vertex tri0[0] (GPU-vs-plugin crosses)
 
         // Free-running clock that drives the oscillation phase.
         private float _clock = 0.5f;
@@ -134,7 +149,7 @@ namespace LiquidWobbleMPB
             }
 
             _smr = _renderer as SkinnedMeshRenderer;
-            _bonesCache = null; _bindposesCache = null;
+            _bonesCache = null; _bindposesCache = null;   // b596: re-cache the skin arrays for this renderer
             _block = new MaterialPropertyBlock();
             // The cum/liquid material carries the chamber bounds; cache it for chamber-centre feed.
             foreach (var m in _renderer.sharedMaterials)
@@ -142,7 +157,7 @@ namespace LiquidWobbleMPB
             // Index of the canal-axis bone in the SMR's bone list (for the tube-centre skinning map).
             if (_smr != null && _smr.bones != null)
                 for (int i = 0; i < _smr.bones.Length; i++)
-                    if (_smr.bones[i] != null && _smr.bones[i].name == TubeCenterBone) { _tubeBoneIdx = i; break; }
+                    if (_smr.bones[i] != null && MainGameWomb.HerNameFor(_smr.bones[i].name) == TubeCenterBone) { _tubeBoneIdx = i; break; }
             if (_smr != null && _smr.bones != null && _tubeBoneIdx < 0)
                 LiquidWobbleMPBPlugin._logger?.LogWarning(
                     $"[bone] TubeCenterBone '{TubeCenterBone}' not found on '{name}' — tube centre anchor disabled (fill may fall back to the box-centre estimate).");
@@ -150,11 +165,20 @@ namespace LiquidWobbleMPB
             _prevPosition = transform.position;
             _prevEuler = transform.rotation.eulerAngles;
 
-            if (_smr != null) LiquidWobbleMPBPlugin.EnsureWombExpand(transform);   // skinned womb only - a bottle (plain MeshRenderer) that got this via the hotkey is not a womb.
+            // Bootstrap WombExpandEffect onto this womb item's root (no 2s scan, no baked
+            // MonoScript). Runtime AddComponent is safe; a freshly-baked MonoScript crashed
+            // Unity's native loader. Scoped to the item via the plugin's FindItemRoot.
+            // Gate on womb IDENTITY, not renderer type. "skinned == womb" was a convention, not an
+            // invariant: MaterialEditor lets a user put CloXray/Liquid on any skinned Studio item, and
+            // since b913 a non-womb reaching EnsureWombExpand draws a false loud "zipmod mismatch"
+            // error. The entrance ring blendshape is the exact identity Resolve() requires anyway.
+            if (_smr != null && _smr.sharedMesh != null
+                && WombExpandEffect.FindBlendShapeIndex(_smr.sharedMesh, "Vagina_1_open") >= 0)
+                LiquidWobbleMPBPlugin.EnsureWombExpand(transform);
 
             // Strip leftover DynamicBone COLLIDERS from the womb skeleton.
             int strippedColliders = 0;
-            if (_smr != null)   // womb only: never strip a bottle's DynamicBoneCollider (it may be the womb's reaction collider).
+            if (_smr != null)   // womb ONLY: never strip a bottle's DynamicBoneCollider (it may be the womb's reaction collider)
             foreach (var comp in GetComponentsInChildren<Component>(true))
             {
                 if (comp == null || comp == this) continue;
@@ -228,7 +252,7 @@ namespace LiquidWobbleMPB
         private void RelinkLiquidMat()
         {
             if (_renderer == null) return;
-            var mats = _renderer.sharedMaterials;   // allocates - called on the setup throttle only.
+            var mats = _renderer.sharedMaterials;   // allocates — called on the setup throttle only
             if (mats == null) return;
             for (int i = 0; i < mats.Length; i++)
             {
@@ -245,7 +269,7 @@ namespace LiquidWobbleMPB
 
         private void OnPreCullCam(Camera cam)
         {
-            if (Time.frameCount == _lastFeedFrame) return;   // first camera of the frame only.
+            if (Time.frameCount == _lastFeedFrame) return;        // first camera of the frame only
             _lastFeedFrame = Time.frameCount;
             FeedFrame();
         }
@@ -257,7 +281,7 @@ namespace LiquidWobbleMPB
             if (!_renderer.isVisible)
                 return;
             if (!LiquidWobbleMPBPlugin.CfgEnabled)
-                return;   // master toggle OFF -> freeze the liquid (the MPB keeps its last-written fill/wobble values).
+                return;   // master toggle OFF -> freeze the liquid (the MPB keeps its last-written fill/wobble values)
             if (string.IsNullOrEmpty(ShaderRotXPropName) || string.IsNullOrEmpty(ShaderRotZPropName))
                 return;
 
@@ -283,7 +307,7 @@ namespace LiquidWobbleMPB
             float decay = 1f - Mathf.Clamp01(dt * Recovery);
             _amplitudeX *= decay;
             _amplitudeZ *= decay;
-            _amplitudeX2 *= decay;   // chamber-2 (tube) amplitude decays the same way.
+            _amplitudeX2 *= decay;   // chamber-2 (tube) amplitude decays the same way
             _amplitudeZ2 *= decay;
 
             // 2) Oscillate the current amplitude.
@@ -337,7 +361,7 @@ namespace LiquidWobbleMPB
                         Matrix4x4 skin = bones[_tubeBoneIdx].localToWorldMatrix * binds[_tubeBoneIdx];
                         Vector3 w2 = skin.MultiplyPoint3x4(ChamberCenterRest(true));
                         _block.SetVector("_Box2CenterWorld", new Vector4(w2.x, w2.y, w2.z, 1f));
-                        _tubeCenterW = w2; _haveTubeC = true;   // capture for the thrust proximity gate.
+                        _tubeCenterW = w2; _haveTubeC = true;   // capture for the thrust proximity gate
                     }
                 }
 
@@ -347,15 +371,15 @@ namespace LiquidWobbleMPB
                     var bones = SkinBones();
                     var binds = SkinBindposes();
                     if (_wombBoneIdx < 0 || _wombBoneIdx >= bones.Length ||
-                        bones[_wombBoneIdx] == null || bones[_wombBoneIdx].name != WombCenterBone)
+                        bones[_wombBoneIdx] == null || MainGameWomb.HerNameFor(bones[_wombBoneIdx].name) != WombCenterBone)
                     {
                         _wombBoneIdx = -1;
                         for (int i = 0; i < bones.Length; i++)
-                            if (bones[i] != null && bones[i].name == WombCenterBone) { _wombBoneIdx = i; break; }
+                            if (bones[i] != null && MainGameWomb.HerNameFor(bones[i].name) == WombCenterBone) { _wombBoneIdx = i; break; }
                     }
                     if (_wombBoneIdx < 0)
                     {
-                        if (!_wombBoneWarned)   // warn once, not every frame.
+                        if (!_wombBoneWarned)   // warn ONCE, not every frame
                         {
                             LiquidWobbleMPBPlugin._logger?.LogWarning(
                                 $"[bone] WombCenterBone '{WombCenterBone}' not found on '{name}' — womb anchor falls back to the box-centre estimate (~40% undershoot at fill=1). Set WombCenterBone via ComponentUtil.");
@@ -368,7 +392,7 @@ namespace LiquidWobbleMPB
                         Matrix4x4 skinW = bones[_wombBoneIdx].localToWorldMatrix * binds[_wombBoneIdx];
                         Vector3 w1 = skinW.MultiplyPoint3x4(ChamberCenterRest(false));
                         _block.SetVector("_Box1CenterWorld", new Vector4(w1.x, w1.y, w1.z, 1f));
-                        _wombCenterW = w1; _haveWombC = true;   // capture for the thrust proximity gate.
+                        _wombCenterW = w1; _haveWombC = true;   // capture for the thrust proximity gate
 
                         // Cum SCALE from the same exact skin matrix (column magnitudes = rest->world scale),
                         // not restSource.lossyScale.
@@ -385,11 +409,14 @@ namespace LiquidWobbleMPB
                 // the real bulb top, immune to blendshape inflation / per-chamber scale / pose.
                 _extentClock += dt;
                 if (_extentClock >= ExtentPeriod) { _extentClock = 0f; UpdateChamberExtents(); }
-                LogAuthoredBounds();
+                LogAuthoredBounds();     // b636 record Studio-authored cum bounds to the log
+                // b647 (adopted, approved): shape mode is the behavior — LUTs valid AND the
+                // material is in its shipped ellipsoid volume mode (users flipping the ME volume
+                // slider to cube/off get exactly what they chose — the plugin only upgrades mode 2).
                 bool shapeOn = _shapeFed && _liquidMat != null
                     && _liquidMat.GetFloat("_VolumeConserve_0off_1cube_2ellipsoid") > 1.5f;
                 _block.SetFloat("_VolumeShape", shapeOn ? 1f : 0f);
-                if (shapeOn) SolveShapeFillLevels();
+                if (shapeOn) SolveShapeFillLevels();   // b644: CPU solve of the 3 fill heights
 
                 // DEBUG (gated by WombExpand 'Debug Log'): print the cum-fill WORLD inputs so a fill desync
                 // can be traced.
@@ -413,31 +440,9 @@ namespace LiquidWobbleMPB
                 }
             }
 
-            // ── Tip-detection DEBUG (gated by the F1 "Debug Log" switch.
-            if (_renderer != null)
-            {
-                bool dbgTip = LiquidWobbleMPBPlugin.CfgDebugLog;
-                _block.SetFloat("_ShowTipDebug", dbgTip ? 1f : 0f);
-                if (dbgTip)
-                {
-                    BPBridge.Reading tip;
-                    Vector3 dbgAnchor = _haveWombC ? _wombCenterW : transform.position;
-                    if (BPBridge.TryReadNear(dbgAnchor, LiquidWobbleMPBPlugin.CfgPairRange, out tip) && tip.found && tip.hasPose)
-                    {
-                        _block.SetVector("_DebugTipPos",     new Vector4(tip.tipPos.x, tip.tipPos.y, tip.tipPos.z, 1f));
-                        _block.SetVector("_DebugTipDir",     new Vector4(tip.tipDir.x, tip.tipDir.y, tip.tipDir.z, 0f));
-                        _block.SetFloat ("_DebugTipDepth01", Mathf.Clamp01(tip.visualDepth));
-                        _block.SetFloat ("_DebugTipGirth",   tip.girthBase * tip.girthFactor);
-                    }
-                    else
-                    {
-                        _block.SetVector("_DebugTipPos", new Vector4(0f, 0f, 0f, 0f));   // w=0 -> overlay skips.
-                    }
-                }
-            }
-
-            // Contact profile: re-push the arrays every frame (~1.3 KB, negligible) rather than trust MPB
-            // array persistence across the GetPropertyBlock round-trip (unverified in Unity 5.6; its failure mode would be silent).
+            // Contact profile: re-push the arrays every frame (~1.3 KB, negligible) rather than
+            // trust MPB array persistence across the GetPropertyBlock round-trip (unverified in
+            // Unity 5.6; its failure mode would be silent). See DESIGN_NOTES.md.
             _block.SetVectorArray("_CapProfC", _profC);
             _block.SetFloatArray("_CapProfR", _profR);
             _block.SetVector("_CapProfInfo", new Vector4(ProfH, ProfA, 0f, _profValid ? 1f : 0f));
@@ -472,9 +477,11 @@ namespace LiquidWobbleMPB
                 {
                     if (_hasPrevDepth)
                     {
-                        float depthVel = (tip.depth - _prevDepth) / dt;   // >0 thrust IN, <0 pull OUT.
-                        // Lean the jolt along the tip's horizontal axis. No pose -> a fixed diagonal so it
-                        // still reads.
+                        float depthVel = (tip.depth - _prevDepth) / dt;   // >0 thrust IN, <0 pull OUT
+                        // Lean the jolt along the tip's horizontal axis (an angled thrust sloshes sideways;
+                        // a purely vertical pump barely tilts). No pose -> a fixed diagonal so it still reads.
+                        // Tip direction expressed in the wobble frame too, so the thrust slosh axis tracks the
+                        // womb's orientation (same world-lock fix as the body motion above).
                         Vector3 tipDirL = (wobFrame != null && tip.hasPose) ? wobFrame.InverseTransformDirection(tip.tipDir) : tip.tipDir;
                         float dirX = tip.hasPose ? tipDirL.x : 0.7071f;
                         float dirZ = tip.hasPose ? tipDirL.z : 0.7071f;
@@ -486,8 +493,8 @@ namespace LiquidWobbleMPB
                             float d2w = (tip.tipPos - _wombCenterW).sqrMagnitude;
                             float d2t = (tip.tipPos - _tubeCenterW).sqrMagnitude;
                             float denom = d2w + d2t + 1e-8f;
-                            float wombW = d2t / denom;   // near womb (d2w->0) => wombW->1.
-                            float tubeW = d2w / denom;   // near tube (d2t->0) => tubeW->1.
+                            float wombW = d2t / denom;   // near womb (d2w->0) => wombW->1
+                            float tubeW = d2w / denom;   // near tube (d2t->0) => tubeW->1
                             _amplitudeX  += ClampImpulse(impX * wombW);
                             _amplitudeZ  += ClampImpulse(impZ * wombW);
                             _amplitudeX2 += ClampImpulse(impX * tubeW);
@@ -506,7 +513,7 @@ namespace LiquidWobbleMPB
                 }
                 else
                 {
-                    _hasPrevDepth = false;   // disengaged / BP absent -> re-engage won't fire a huge first jolt.
+                    _hasPrevDepth = false;   // disengaged / BP absent -> re-engage won't fire a huge first jolt
                 }
             }
 
@@ -548,7 +555,7 @@ namespace LiquidWobbleMPB
                     return;
                 }
             }
-            if (!_setupMatWarned)   // fail-loud: setup sliders inactive until a material exposes these props.
+            if (!_setupMatWarned)   // fail-loud: setup sliders inactive until a material exposes these props
             {
                 LiquidWobbleMPBPlugin._logger?.LogWarning(
                     $"[setup] no live material on '{name}' declares the wobble setup props (_ThrustSlosh_0off_1global_2perChamber/_MaxWobble/...); " +
@@ -615,7 +622,7 @@ namespace LiquidWobbleMPB
         // Centre of a chamber's bounds box in REST (mesh-local) units, read from the liquid material.
         private Vector3 ChamberCenterRest(bool chamber2)
         {
-            if (_liquidMat == null) return Vector3.zero;   // defensive: callers guard, but never NRE here.
+            if (_liquidMat == null) return Vector3.zero;   // defensive: callers guard, but never NRE here
             int[] id = chamber2 ? _c2BoundIds : _boundIds;
             float minX = _liquidMat.GetFloat(id[0]);
             float maxX = _liquidMat.GetFloat(id[1]);
@@ -674,7 +681,7 @@ namespace LiquidWobbleMPB
                         float m = Mathf.Abs(tmp[k].x) + Mathf.Abs(tmp[k].y) + Mathf.Abs(tmp[k].z);
                         if (m > mx) mx = m;
                     }
-                    if (mx > 1e-6f) { delta[s] = (Vector3[])tmp.Clone(); kept++; }   // shapes not touching the cum stay null (skipped in eval).
+                    if (mx > 1e-6f) { delta[s] = (Vector3[])tmp.Clone(); kept++; }   // shapes not touching the cum stay null (skipped in eval)
                 }
             }
             for (int s = 0; s < shapeCount; s++) _smr.SetBlendShapeWeight(s, savedW[s]);
@@ -757,7 +764,7 @@ namespace LiquidWobbleMPB
             {
                 var d = _basisDelta[s];
                 if (d == null) continue;
-                float w = (useSentinel ? _sentinelShapes[s] : _smr.GetBlendShapeWeight(s)) * 0.01f;   // KK weight is 0..100.
+                float w = (useSentinel ? _sentinelShapes[s] : _smr.GetBlendShapeWeight(s)) * 0.01f;   // KK weight is 0..100
                 if (w == 0f) continue;
                 for (int k = 0; k < n; k++)
                 {
@@ -821,8 +828,8 @@ namespace LiquidWobbleMPB
                 return;
             if (_cumVerts == null)
             {
-                _cumVerts    = shared.GetTriangles(0);   // submesh 0 = cum (duplicate indices fine for min/max).
-                _restVerts   = shared.vertices;   // base (rest) positions, object space.
+                _cumVerts    = shared.GetTriangles(0);   // submesh 0 = cum (duplicate indices fine for min/max)
+                _restVerts   = shared.vertices;          // base (rest) positions, object space
             }
             if (_restVerts == null)
                 return;
@@ -871,12 +878,20 @@ namespace LiquidWobbleMPB
             Matrix4x4 bakeM = rt != null ? Matrix4x4.TRS(rt.position, rt.rotation, Vector3.one) : Matrix4x4.identity;
             // ── STAGE-2: capture once at spawn, assert rigidity, evaluate on weight changes.
             if (!_basisCaptured && !CaptureSkinnedBasis(shared, rt))
-                return;   // degenerate transient (logged) - retried next dirty frame.
-            // via its TRANSFORM (Studio items).
+                return;                                   // degenerate transient (logged) — retried next dirty frame
+            // WORLD-FRAME ANCHOR (b461): the renderer-transform frame above only tracks a womb that
+            // moves via its TRANSFORM (Studio items). A MAIN-GAME womb moves via its BONES (the
+            // mirror) while the transform stays at the spawn spot — the fill plane froze there (H
+            // diag: ext1 120mm above the live womb -> 30% fill rendered as FULL, and "cum moves when
+            // the womb stretches"). Fix: carry the frame by the anchor BONE's delta since capture —
+            // identity for a bone-static Studio item (bones ride the item transform, so the delta IS
+            // the item motion), live for a mirrored H womb. Scale: the delta's column norms times the
+            // capture-time lossyScale (H womb-scale lives in the bones; Studio rescale shows in both
+            // the delta and lossyScale identically through this product).
             if (!_extAnchorCaptured && rt != null)
             {
                 for (int b = 0; b < bones.Length; b++)
-                    if (bones[b] != null && bones[b].name == WombCenterBone) { _extAnchor = bones[b]; break; }
+                    if (bones[b] != null && MainGameWomb.HerNameFor(bones[b].name) == WombCenterBone) { _extAnchor = bones[b]; break; }
                 if (_extAnchor == null)
                     for (int b = 0; b < bones.Length; b++)
                         if (bones[b] != null) { _extAnchor = bones[b]; break; }
@@ -888,13 +903,13 @@ namespace LiquidWobbleMPB
                     _extAnchorCaptured = true;
                 }
             }
-            if (LiquidWobbleMPBPlugin.CfgDebugLog) AssertRigRigid(bones);   // dev sanity check (warn-only) -> Debug Log gated, so release does no per-frame bone scan and never spams the warning.
+            if (LiquidWobbleMPBPlugin.CfgDebugLog) AssertRigRigid(bones);  // dev sanity check (warn-only) -> Debug Log gated, so release does no per-frame bone scan and never spams the warning
             if (weightsDirty || _lpCache == null)
                 EvaluateBasis();
             Vector3 sNow;
             if (_extAnchorCaptured && _extAnchor != null)
             {
-                Matrix4x4 Dw = _extAnchor.localToWorldMatrix * _extAnchor0Inv;   // anchor's world delta since capture.
+                Matrix4x4 Dw = _extAnchor.localToWorldMatrix * _extAnchor0Inv;   // anchor's world delta since capture
                 Matrix4x4 M = Dw * _extBakeM0;
                 Vector3 my = ((Vector3)M.GetColumn(1)).normalized, mz = ((Vector3)M.GetColumn(2)).normalized;
                 bakeM = Matrix4x4.TRS((Vector3)M.GetColumn(3), Quaternion.LookRotation(mz, my), Vector3.one);
@@ -920,7 +935,7 @@ namespace LiquidWobbleMPB
             float wy1mn = float.MaxValue, wy1mx = float.MinValue, wy2mn = float.MaxValue, wy2mx = float.MinValue;
             EnsureCoreBand(divider);
             float cy1mn = float.MaxValue, cy1mx = float.MinValue;
-            float cl1mn = float.MaxValue, cl1mx = float.MinValue;
+            float cl1mn = float.MaxValue, cl1mx = float.MinValue;   // b640: core band in RENDERER-LOCAL Y (for the wirebox)
             Vector3 mn1 = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
             Vector3 mx1 = new Vector3(float.MinValue, float.MinValue, float.MinValue);
             Vector3 mn2 = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
@@ -942,8 +957,8 @@ namespace LiquidWobbleMPB
                 lp.x *= sNow.x; lp.y *= sNow.y; lp.z *= sNow.z;
                 Vector3 wp = bakeM.MultiplyPoint3x4(lp);
                 if (_wpCache == null || _wpCache.Length < _cumVertsUnique.Length) _wpCache = new Vector3[_cumVertsUnique.Length];
-                _wpCache[k] = wp;
-                if (i == v0) _dbgV0W = wp;   // probe vertex world pos (same source as the box).
+                _wpCache[k] = wp;   // b643: cached for the volume-profile pass (both chambers)
+                if (i == v0) _dbgV0W = wp;   // probe vertex world pos (same source as the box)
                 if (_restVerts[i].y < divider - ChamberSplitBias)
                 {
                     if (wp.y < wy2mn) wy2mn = wp.y; if (wp.y > wy2mx) wy2mx = wp.y;
@@ -952,7 +967,7 @@ namespace LiquidWobbleMPB
                 }
                 else
                 {
-                    _profWp[_profCount++] = wp;   // chamber-1 sample for the contact profile.
+                    _profWp[_profCount++] = wp;   // chamber-1 sample for the contact profile
                     if (wp.y < wy1mn) wy1mn = wp.y; if (wp.y > wy1mx) wy1mx = wp.y;
                     float ry = _restVerts[i].y;
                     if (ry >= _coreLo && ry <= _coreHi)
@@ -978,8 +993,8 @@ namespace LiquidWobbleMPB
                 _dbgExt1 = new Vector4(wy1mn, wy1mx, 0f, 1f); _block.SetVector("_Chamber1ExtentY", _dbgExt1);
                 _block.SetVector("_Box1LocalMin", new Vector4(mn1.x, mn1.y, mn1.z, 1f));
                 _block.SetVector("_Box1LocalMax", new Vector4(mx1.x, mx1.y, mx1.z, 1f));
-                _dbgBakeC1 = bakeM.MultiplyPoint3x4((mn1 + mx1) * 0.5f);   // measured chamber-1 center (world) for the [fill] log.
-                BuildCapProfile(wy1mn, wy1mx);   // v361 rim clamp (validity coupled to the extents; pushed every frame).
+                _dbgBakeC1 = bakeM.MultiplyPoint3x4((mn1 + mx1) * 0.5f);   // measured chamber-1 center (world) for the [fill] log
+                BuildCapProfile(wy1mn, wy1mx);   // v361 rim clamp (validity coupled to the extents; pushed every frame)
             }
             if (wy2mx > wy2mn)
             {
@@ -987,7 +1002,7 @@ namespace LiquidWobbleMPB
                 _block.SetVector("_Box2LocalMin", new Vector4(mn2.x, mn2.y, mn2.z, 1f));
                 _block.SetVector("_Box2LocalMax", new Vector4(mx2.x, mx2.y, mx2.z, 1f));
             }
-            BuildVolumeProfiles(divider, wy1mn, wy1mx, wy2mn, wy2mx);
+            BuildVolumeProfiles(divider, wy1mn, wy1mx, wy2mn, wy2mx);   // b643: shape-mode LUTs
             LogDomeProfile(divider);
         }
 
@@ -996,8 +1011,8 @@ namespace LiquidWobbleMPB
         private readonly float[] _pbMnX = new float[32], _pbMxX = new float[32], _pbMnZ = new float[32], _pbMxZ = new float[32];
         private readonly int[] _pbCnt = new int[32];
         private readonly float[] _volCum1 = new float[16], _volCum2 = new float[16];
-        private float _volTot1, _volTot2;   // absolute chamber volumes (world m^3-ish).
-        private float _shY1mn, _shY1mx, _shY2mn, _shY2mx;   // extents the curves were measured over.
+        private float _volTot1, _volTot2;                      // absolute chamber volumes (world m^3-ish)
+        private float _shY1mn, _shY1mx, _shY2mn, _shY2mx;      // extents the curves were measured over
         private bool _shCh2ok, _shapeFed;
 
         private void BuildVolumeProfiles(float divider, float y1mn, float y1mx, float y2mn, float y2mx)
@@ -1005,7 +1020,7 @@ namespace LiquidWobbleMPB
             if (_wpCache == null || _restVerts == null) return;
             bool ch1ok = y1mx > y1mn + 1e-6f;
             bool ch2ok = y2mx > y2mn + 1e-6f;
-            if (!ch1ok) { _shapeFed = false; return; }   // nothing measurable - shader flag stays off below.
+            if (!ch1ok) { _shapeFed = false; return; }   // nothing measurable — shader flag stays off below
             const int PB = 16; const float QPI = 0.785398163f;
             for (int b = 0; b < 32; b++) { _pbMnX[b] = float.MaxValue; _pbMxX[b] = float.MinValue; _pbMnZ[b] = float.MaxValue; _pbMxZ[b] = float.MinValue; _pbCnt[b] = 0; }
             float r1 = PB / Mathf.Max(y1mx - y1mn, 1e-6f);
@@ -1043,11 +1058,11 @@ namespace LiquidWobbleMPB
                     area = dx * dz * qpi;
                 }
                 total += area * binH;
-                dst[s] = total;   // cumulative (normalized below).
+                dst[s] = total;   // cumulative (normalized below)
             }
             float inv = total > 1e-12f ? 1f / total : 0f;
             for (int s = 0; s < 16; s++) dst[s] *= inv;
-            dst[15] = 1f;   // pin F(top) = exactly 1 (fill=1 truly full).
+            dst[15] = 1f;   // pin F(top) = exactly 1 (fill=1 truly full)
             return total;
         }
 
@@ -1148,7 +1163,7 @@ namespace LiquidWobbleMPB
                 if (hx >= pkX * CoreFrac && hz >= pkZ * CoreFrac) { if (lo < 0) lo = b; hi = b; }
             }
             float bandH = range / NB;
-            if (lo < 0) { _coreLo = yMin; _coreHi = yMax; }   // nothing qualified -> full span.
+            if (lo < 0) { _coreLo = yMin; _coreHi = yMax; }        // nothing qualified -> full span
             else { _coreLo = yMin + lo * bandH; _coreHi = yMin + (hi + 1) * bandH; }
             _coreDone = true;
             LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: CORE-BAND frac=" + CoreFrac.ToString("F2")
@@ -1171,7 +1186,7 @@ namespace LiquidWobbleMPB
                 for (int k = 0; k < _cumVertsUnique.Length; k++)
                 {
                     int i = _cumVertsUnique[k]; if (i < 0 || i >= _restVerts.Length) continue;
-                    if (_restVerts[i].y < divider) continue;   // chamber 1 (womb) only.
+                    if (_restVerts[i].y < divider) continue;   // chamber 1 (womb) only
                     float y = _restVerts[i].y; if (y < yMin) yMin = y; if (y > yMax) yMax = y;
                 }
                 if (yMax <= yMin) return;
@@ -1249,7 +1264,7 @@ namespace LiquidWobbleMPB
                     if (h - d >= 0 && _profRowAny[h - d]) src = h - d;
                     else if (h + d < ProfH && _profRowAny[h + d]) src = h + d;
                 }
-                _profC[h] = src >= 0 ? _profC[src] : Vector4.zero;   // src==-1 impossible (caller guards >=1 ch-1 vert).
+                _profC[h] = src >= 0 ? _profC[src] : Vector4.zero;   // src==-1 impossible (caller guards >=1 ch-1 vert)
             }
             // 3) per-cell MAX radii, max-SPLAT into the cells the shader's bilinear sample reads at this
             // vert's own (angle, height).
@@ -1269,7 +1284,7 @@ namespace LiquidWobbleMPB
             {
                 int b = h * ProfA; bool any = false;
                 for (int a = 0; a < ProfA; a++) if (_profR[b + a] > 0f) { any = true; break; }
-                _profRowAny[h] = any;   // reused: now = post-splat radius-row occupancy.
+                _profRowAny[h] = any;   // reused: now = post-splat radius-row occupancy
             }
             for (int h = 0; h < ProfH; h++)
             {

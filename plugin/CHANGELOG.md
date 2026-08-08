@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.1.2
+
+- **The balls never draw through her body or clothes any more.** In the open they render normally
+  and block the x-ray window like a hand. The white and wrong-colour sack ghosts that could show
+  through clothing are gone with them.
+- **Hands and limbs block the x-ray.** Bare limbs out of the box; a sleeved hand blocks after
+  setting `LimbBlockInflate` on the body copy (per outfit — see the manual). Thighs stay
+  see-through. An F1 switch turns the whole feature off. Older scenes pick it up on the first
+  hotkey press.
+- **Fixed a male torso turning permanently invisible** after pressing the hotkey and then
+  undressing him. The game was writing its clothing mask to a material that was no longer the one
+  on screen, which even removing the plugin could not undo. Heals automatically on apply now.
+- **Fixed the white cap and sliver at the penis tip and base inside the window** — skin textures
+  clip and fade in those zones; the window now paints them solid.
+- The window's edge fades out instead of cutting hard.
+- Stamped-window ("x-ray machine") scenes keep working, and her hands block those windows too.
+- Old Studio scenes: constraint links to womb bones renamed in 7.4.0 migrate automatically on
+  load; links to deleted bones are reported instead of silently dropped.
+- Womb item 7.4.1 — identical shape, and its Studio item-FK bone list works again.
+- Removed a debug overlay that could draw a blue ring on the penis while the diagnostic log was on.
+
 ## 1.1.1
 
 - **The womb never turned see-through on some setups** — its shaders were not loading correctly there,

@@ -74,6 +74,11 @@ Shader "CloXray/OrgInside"
         // Visibility when the object is outside any character body (stencil=0).
         // 1 = fully visible (default, matches old behavior). 0 = invisible.
         _OutsideOfBodyAlpha ("Outside-Body Visibility", Range(0, 1)) = 1.0
+        // In-window painters must be OPAQUE: skin textures alpha-fade at the base seam to blend
+        // into the torso, but inside the window the torso is not painted - blending there just
+        // exposes the veil as a white sliver (b948, the penis-base white). The plugin sets this
+        // on the penis carve only; the womb keeps texture-alpha translucency at the default 0.
+        [Enum(Off,0,On,1)] _OpaqueMainTex ("Opaque MainTex (ignore texture alpha)", Float) = 0
         // Open the x-ray window on up-the-open-canal rays from below (pixels the
         // uterus EXTERIOR never covered). 0 = off (DEFAULT; canal hidden by skin),
         // 1 = on (see up the open canal). The womb's own interior material bakes this
@@ -84,6 +89,10 @@ Shader "CloXray/OrgInside"
         // outside-body look stays 100% the original material's own painting from its own queue.
         // Used by the plugin's penis x-ray "carve" copy (with _OutsideOfBodyAlpha=0, making the
         [Enum(Off,0,On,1)] _OutsideShieldDepth ("Outside Shield Depth (block later re-draws)", Float) = 0
+        // UV-space content mask: a copy clips to the mask's WHITE region. Cutoff 0 = OFF, which is
+        // what the womb and penis copies use, so they are untouched.
+        _RegionMask ("Region Mask", 2D) = "white" {}
+        _RegionMaskCutoff ("Region Mask Cutoff", Range(0, 1)) = 0
     }
     SubShader
     {
@@ -110,8 +119,31 @@ Shader "CloXray/OrgInside"
 
         float _BehindBodyAlpha;
         float _OutsideOfBodyAlpha;
+        float _OpaqueMainTex;
         float _OutsideShieldDepth;
-
+        sampler2D _RegionMask;
+        float4 _RegionMask_ST;
+        float _RegionMaskCutoff;
+        // Ordered 4x4 Bayer in [0,1) - pure math, ps_3_0-safe.
+        float Bayer2(float2 a) { a = floor(a); return frac(a.x / 2.0 + a.y * a.y * 0.75); }
+        float Bayer4(float2 a) { return Bayer2(0.5 * a) * 0.25 + Bayer2(a); }
+        // Content-mask clip (b935): keep only the mask's WHITE region. No-op at cutoff 0.
+        // Dithered against the mask's blurred boundary band (2026-08-06): the seam fades instead of
+        // cutting hard. Needs the pixel position, so callers pass their SV_POSITION xy.
+        void MaskClipD(float2 uv, float dither01)
+        {
+            if (_RegionMaskCutoff > 0)
+                // clamp keeps the extremes absolute: Bayer reaches exactly 0 and clip(0) does not
+                // discard, so an unclamped threshold let 1-in-16 pixels pass even on pure-black mask
+                // texels - the dan_f carve drew the SACK as a sparse ghost through body and clothes.
+                clip(tex2D(_RegionMask, uv * _RegionMask_ST.xy + _RegionMask_ST.zw).r
+                     - clamp(_RegionMaskCutoff + (dither01 - 0.5), 0.001, 0.999));
+        }
+        void MaskClip(float2 uv)   // uv-only callers keep the hard clip semantics at solid regions
+        {
+            if (_RegionMaskCutoff > 0)
+                clip(tex2D(_RegionMask, uv * _RegionMask_ST.xy + _RegionMask_ST.zw).r - _RegionMaskCutoff);
+        }
         float3 AmbientShadowAdjust(){
             float4 u_xlat5; float4 u_xlat6; float u_xlat30; bool u_xlatb30; float u_xlat31;
             u_xlatb30 = _ambientshadowG.y>=_ambientshadowG.z; u_xlat30 = u_xlatb30 ? 1.0 : float(0.0);
@@ -167,6 +199,11 @@ Shader "CloXray/OrgInside"
 
         fixed4 fragOrgInside(Varyings i, int faceDir : VFACE) : SV_Target
         {
+#if defined(SHADER_API_D3D9)
+            MaskClipD(i.uv0, 0.5);   // d3d9 cannot read SV_POSITION in a fragment - hard edge there
+#else
+            MaskClipD(i.uv0, Bayer4(i.posCS.xy));   // posCS is SV_POSITION = pixel coords in the fragment
+#endif
             float4 mainTex = tex2D(_MainTex, i.uv0 * _MainTex_ST.xy + _MainTex_ST.zw);
             AlphaClip(i.uv0, mainTex.a);
             float3 worldLightPos = normalize(_WorldSpaceLightPos0.xyz);
@@ -273,7 +310,7 @@ Shader "CloXray/OrgInside"
             finalDiffuse = lerp(finalDiffuse, kkpFresCol, _KKPRimColor.a * kkpFres * (1 - _KKPRimAsDiffuse));
             float4 emission = GetEmission(i.uv0);
             finalDiffuse = finalDiffuse * (1 - emission.a) + (emission.a * emission.rgb);
-            return float4(finalDiffuse, mainTex.a * _Alpha);
+            return float4(finalDiffuse, (_OpaqueMainTex > 0.5 ? 1.0 : mainTex.a) * _Alpha);   // b948: see _OpaqueMainTex
         }
 
         // BehindBody variant: full lighting * _BehindBodyAlpha for ghost-through-skin.
@@ -320,12 +357,13 @@ Shader "CloXray/OrgInside"
 
             float _BottomWindow;
 
-            struct appdata { float4 vertex : POSITION; };
-            struct v2f    { float4 pos : SV_POSITION; };
+            struct appdata { float4 vertex : POSITION; float2 uv : TEXCOORD0; };
+            struct v2f    { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 
             v2f vert(appdata v)
             {
                 v2f o;
+                o.uv = v.uv;
                 o.pos = UnityObjectToClipPos(v.vertex);
                 // Push to FAR plane, accounting for reversed-Z on DX11+
                 // (identical idiom to the DepthClear pass below).
@@ -340,6 +378,11 @@ Shader "CloXray/OrgInside"
             {
                 // Toggle OFF = discard = no stencil write, no depth write:
                 if (_BottomWindow < 0.5) discard;
+#if defined(SHADER_API_D3D9)
+                MaskClipD(i.uv, 0.5);
+#else
+                MaskClipD(i.uv, Bayer4(i.pos.xy));
+#endif
                 return 0;
             }
             ENDCG
@@ -417,11 +460,27 @@ Shader "CloXray/OrgInside"
             #pragma fragment frag
             #include "UnityCG.cginc"
 
-            struct appdata { float4 vertex : POSITION; };
-            struct v2f    { float4 pos : SV_POSITION; };
+            // (junction uniforms come from the file-level CGINCLUDE - see DepthClear.)
+            struct appdata { float4 vertex : POSITION; float2 uv : TEXCOORD0; };
+            struct v2f    { float4 pos : SV_POSITION; float3 posWS : TEXCOORD0; float2 uv : TEXCOORD1; };
 
-            v2f vert(appdata v) { v2f o; o.pos = UnityObjectToClipPos(v.vertex); return o; }
-            fixed4 frag(v2f i) : SV_Target { return 0; }
+            v2f vert(appdata v)
+            {
+                v2f o;
+                o.pos = UnityObjectToClipPos(v.vertex);
+                o.posWS = mul(unity_ObjectToWorld, v.vertex).xyz;
+                o.uv = v.uv;
+                return o;
+            }
+            fixed4 frag(v2f i) : SV_Target
+            {
+#if defined(SHADER_API_D3D9)
+                MaskClipD(i.uv, 0.5);
+#else
+                MaskClipD(i.uv, Bayer4(i.pos.xy));
+#endif
+                return 0;
+            }
             ENDCG
         }
 

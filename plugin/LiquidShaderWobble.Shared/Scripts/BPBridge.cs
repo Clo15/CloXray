@@ -10,26 +10,26 @@ namespace LiquidWobbleMPB
     {
         private const BindingFlags BF = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-        private static bool _tried;   // true once BP is bound (then never re-scan).
-        private static float _nextScan;   // throttle the assembly re-scan while BP's lazy assembly hasn't loaded.
+        private static bool _tried;          // true once BP is bound (then never re-scan)
+        private static float _nextScan;      // throttle the assembly re-scan while BP's lazy assembly hasn't loaded
         private static bool _bpMissingLogged;
         private static Type _ctrlType;
         private static FieldInfo _fDan;
         private static FieldInfo _danDist, _danBaseLen, _danRad, _danColliders, _danOptions;
         private static FieldInfo _optRadiusScale, _optLengthSquish, _optGirthSquish, _optSquishThreshold;
-        private static FieldInfo _colRadius;   // DynamicBoneCollider.m_Radius (resolved lazily).
-        private static FieldInfo _danTargetsValid;   // public bool on BetterPenetrationController (BP re-init finished).
-        private static PropertyInfo _chaControlProp;   // CharaCustomFunctionController.ChaControl.
+        private static FieldInfo _colRadius; // DynamicBoneCollider.m_Radius (resolved lazily)
+        private static FieldInfo _danTargetsValid;   // public bool on BetterPenetrationController (BP re-init finished)
+        private static PropertyInfo _chaControlProp;  // CharaCustomFunctionController.ChaControl
 
         // Cached controller instances - refreshed on a slow timer, NOT every frame.
         private static UnityEngine.Object[] _cache = new UnityEngine.Object[0];
-        private static bool[] _hasPenis = new bool[0];   // owns a real penis mesh (a female-bodied character with one included).
-        private static Transform[] _tipBones = new Transform[0];   // each controller's k_f_dan_end (BP TARGET marker.
-        private static Transform[] _entryBones = new Transform[0];   // each controller's k_f_dan_entry.
-        private static Transform[] _danTipBones = new Transform[0];   // each controller's DEEPEST cm_j_dan* shaft bone = the visual mesh tip (tracks bend+squish).
-        private static Transform[][] _danShaftBones = new Transform[0][];   // each controller's full cm_j_dan* shaft chain (base..tip), for the womb's whole-shaft containment test.
-        private static readonly System.Collections.Generic.List<Vector3> _gPosBuf = new System.Collections.Generic.List<Vector3>(16);   // reusable: per-collider girth-profile positions.
-        private static readonly System.Collections.Generic.List<float>   _gRadBuf = new System.Collections.Generic.List<float>(16);   // reusable: per-collider girth-profile world radii.
+        private static bool[] _hasPenis = new bool[0];                // owns a real penis mesh (a female-bodied character with one included)
+        private static Transform[] _tipBones = new Transform[0];      // each controller's k_f_dan_end (BP TARGET marker — only at the tip when constraint-driven)
+        private static Transform[] _entryBones = new Transform[0];    // each controller's k_f_dan_entry (the ENTRY marker; cf_J_Vagina_root constraint pins it at the womb mouth -> the womb<->penis pairing key)
+        private static Transform[] _danTipBones = new Transform[0];   // each controller's DEEPEST cm_j_dan* shaft bone = the visual mesh tip (tracks bend+squish)
+        private static Transform[][] _danShaftBones = new Transform[0][]; // each controller's full cm_j_dan* shaft chain (base..tip), for the womb's whole-shaft containment test
+        private static readonly System.Collections.Generic.List<Vector3> _gPosBuf = new System.Collections.Generic.List<Vector3>(16);  // reusable: per-collider girth-profile positions
+        private static readonly System.Collections.Generic.List<float>   _gRadBuf = new System.Collections.Generic.List<float>(16);    // reusable: per-collider girth-profile world radii
         private static float _refreshTimer;
         private const float RefreshInterval = 2f;
 
@@ -38,8 +38,8 @@ namespace LiquidWobbleMPB
         // Snapshot of one live BP controller for the on-load penis-bend re-assert.
         public struct BpMale
         {
-            public Component chaControl;   // CharaCustomFunctionController.ChaControl (the male body).
-            public bool danTargetsValid;   // BP finished its load re-init (danTargets re-resolved).
+            public Component chaControl;    // CharaCustomFunctionController.ChaControl (the male body)
+            public bool danTargetsValid;    // BP finished its load re-init (danTargets re-resolved)
         }
 
         // The character BetterPenetration currently has this penis bound to (its collision agent), or null.
@@ -103,15 +103,20 @@ namespace LiquidWobbleMPB
 
         private static MethodInfo _miInitDan, _miSetCollision, _miReleaseFK;
 
-        // Which BetterPenetration is installed.
-        private static int _bpCaps = -1;   // bit0 = own dup guard, bit1 = own FK release.
+        // Which BetterPenetration is installed. Two methods mark a build that handles these itself:
+        // DanBoneAlreadyConstrained -> BP refuses to re-add a dan constraint that already exists
+        // ReleaseDanBonesFromFK -> BP patches OCIChar.ActiveFK itself and frees the dan bones
+        // Each CloXray equivalent installs only where BP lacks its counterpart: BP's duplicate guard
+        // is per bone, and two postfixes on OCIChar.ActiveFK would do the same work twice. Re-checked
+        // until BP's lazily-loaded assembly appears; the result is logged once.
+        private static int _bpCaps = -1;   // bit0 = own dup guard, bit1 = own FK release
         private static int BpCaps
         {
             get
             {
                 if (_bpCaps >= 0) return _bpCaps;
                 Init();
-                if (_ctrlType == null) return 0;   // BP not loaded yet - ask again next call.
+                if (_ctrlType == null) return 0;   // BP not loaded yet - ask again next call
                 int caps = 0;
                 if (_ctrlType.GetMethod("DanBoneAlreadyConstrained", BF) != null) caps |= 1;
                 if (_ctrlType.GetMethod("ReleaseDanBonesFromFK", BF) != null) caps |= 2;
@@ -174,7 +179,7 @@ namespace LiquidWobbleMPB
                 bool valid = _danTargetsValid != null && Convert.ToBoolean(_danTargetsValid.GetValue(ctl));
                 if (!valid)
                 {
-                    _inRebind = true;   // its own init must not re-enter via the DanInitPostfix.
+                    _inRebind = true;   // our own init must not re-enter via the DanInitPostfix
                     try { _miInitDan.Invoke(ctl, null); } finally { _inRebind = false; }
                 }
                 _miSetCollision.Invoke(ctl, new object[] { femaleCc, kokan, ana, false });
@@ -250,9 +255,9 @@ namespace LiquidWobbleMPB
             if (_ctrlType == null)
             {
                 if (!_bpMissingLogged) { _bpMissingLogged = true; LiquidWobbleMPBPlugin._logger?.LogInfo("BPBridge: BetterPenetration not present yet — watching for a BP character (no-op until then)."); }
-                return;   // do NOT set _tried: retry on the next call (throttled) so a lazy BP load is picked up.
+                return;   // do NOT set _tried: retry on the next call (throttled) so a lazy BP load is picked up
             }
-            _tried = true;   // bound successfully - stop scanning.
+            _tried = true;   // bound successfully — stop scanning
 
             _fDan = _ctrlType.GetField("danAgent", BF);
             var danT = _fDan != null ? _fDan.FieldType : null;
@@ -266,8 +271,8 @@ namespace LiquidWobbleMPB
             _optLengthSquish    = optT != null ? optT.GetField("danLengthSquish", BF) : null;
             _optGirthSquish     = optT != null ? optT.GetField("danGirthSquish", BF) : null;
             _optSquishThreshold = optT != null ? optT.GetField("squishThreshold", BF) : null;
-            _danTargetsValid    = _ctrlType.GetField("danTargetsValid", BF);   // public bool - BP load re-init done.
-            _chaControlProp     = _ctrlType.GetProperty("ChaControl", BF);   // CharaCustomFunctionController.ChaControl.
+            _danTargetsValid    = _ctrlType.GetField("danTargetsValid", BF);                 // public bool — BP load re-init done
+            _chaControlProp     = _ctrlType.GetProperty("ChaControl", BF);                   // CharaCustomFunctionController.ChaControl
 
             LiquidWobbleMPBPlugin._logger?.LogInfo(
                 $"BPBridge: hooked BP. dist={_danDist != null} baseLen={_danBaseLen != null} " +
@@ -278,29 +283,29 @@ namespace LiquidWobbleMPB
         public struct Reading
         {
             public bool found;
-            public float depth;   // raw penetration 0..1 (engage/squish math).
-            public float visualDepth;   // length-squished (rendered) tip depth -> drives rings/stretch.
-            public float girthBase;   // avg collider radius * danRadiusScale (maker+studio width).
-            public float girthFactor;   // deep-press fattening multiplier (>=1).
-            public float dist;   // raw lastDanDistance (diagnostic).
-            public float baseLen;   // m_baseDanLength (diagnostic).
-            public Vector3 tipPos;   // DEBUG: world pos of the tip (last) collider.
-            public Vector3 tipDir;   // DEBUG: base->tip unit direction.
-            public bool    hasPose;   // DEBUG: true when >=2 colliders gave a world pose.
-            public Vector3[] shaftPos;   // WORLD positions of every real cm_j_dan* shaft bone (base..tip) for the matched.
-                                       // male - lets the womb test the whole bent shaft, not just the
-                                       // curl-prone tip.
-            public Vector3 aimedTipPos;   // k_f_dan_end (the aimed/constraint-driven tip). CONTAINMENT signal only.
-            public bool aimedValid;
-            public float girthTip;   // WORLD radius of the TIP collider = the girth the womb actually contacts.
-                                       // glans pushing the cervix). Fallback when the full profile isn't
-                                       // available.
-            public Vector3[] girthPos;   // per-collider WORLD position (base..tip) and paired WORLD radius = the penis.
-            public float[]   girthRad;   // GIRTH PROFILE (m_danColliderRadius*danRadiusScale*lossyScale).
-                                       // each ring to the profile by DISTANCE-FROM-TIP (the penis part at
-                                       // that ring), so the canal tapers with the penis.
-            public string srcName;   // DEBUG: the paired BP controller's character name (which penis won the pairing).
-            public Vector3 entryPos;   // DEBUG: the paired penis's k_f_dan_entry world position (the node the pairing matched).
+            public float depth;        // raw penetration 0..1 (engage/squish math)
+            public float visualDepth;  // length-squished (rendered) tip depth -> drives rings/stretch
+            public float girthBase;    // avg collider radius * danRadiusScale (maker+studio width)
+            public float girthFactor;  // deep-press fattening multiplier (>=1)
+            public float dist;         // raw lastDanDistance (diagnostic)
+            public float baseLen;      // m_baseDanLength (diagnostic)
+            public Vector3 tipPos;     // DEBUG: world pos of the tip (last) collider
+            public Vector3 tipDir;     // DEBUG: base->tip unit direction
+            public bool    hasPose;    // DEBUG: true when >=2 colliders gave a world pose
+            public Vector3[] shaftPos; // WORLD positions of every REAL cm_j_dan* shaft bone (base..tip) for the matched
+                                       // male — lets the womb test the whole bent shaft, not just the curl-prone tip.
+            public Vector3 aimedTipPos;// k_f_dan_end (the aimed/constraint-driven tip). CONTAINMENT signal only — it's
+            public bool aimedValid;    // glued to penis_target when the user aims the penis, so it is NOT a depth signal.
+            public float girthTip;     // WORLD radius of the TIP collider = the girth the womb actually contacts (the
+                                       // glans pushing the cervix). Fallback when the full profile isn't available.
+            public Vector3[] girthPos; // per-collider WORLD position (base..tip) and paired WORLD radius = the penis
+            public float[]   girthRad; // GIRTH PROFILE (m_danColliderRadius*danRadiusScale*lossyScale). The womb maps
+                                       // each ring to the profile by DISTANCE-FROM-TIP (the penis part at that ring),
+                                       // so the canal tapers with the penis. Mapping-by-POSITION was the dead end (the
+                                       // off-centre womb put every collider below its entrance) — distance-from-tip
+                                       // uses the penis's INTRINSIC curve + insertion depth, no shared-axis needed.
+            public string srcName;     // DEBUG: the paired BP controller's character name (which penis won the pairing)
+            public Vector3 entryPos;   // DEBUG: the paired penis's k_f_dan_entry world position (the node the pairing matched)
         }
 
         private static readonly System.Collections.Generic.Dictionary<FieldInfo, Func<object, float>> _fGetters
@@ -339,18 +344,18 @@ namespace LiquidWobbleMPB
         private static int _cacheTickFrame = -1;
         private static void EnsureCache()
         {
-            if (Time.frameCount != _cacheTickFrame) { _refreshTimer -= Time.deltaTime; _cacheTickFrame = Time.frameCount; }   // tick the timer once per frame however many readers call.
+            if (Time.frameCount != _cacheTickFrame) { _refreshTimer -= Time.deltaTime; _cacheTickFrame = Time.frameCount; }   // tick the timer ONCE per frame however many readers call us
             bool stale = _refreshTimer <= 0f || _cache.Length == 0;
             if (!stale)
                 for (int i = 0; i < _cache.Length; i++)
                     if (_cache[i] == null) { stale = true; break; }
             if (!stale) return;
             _cache = UnityEngine.Object.FindObjectsOfType(_ctrlType);
-            _hasPenis = new bool[_cache.Length];   // real penis mesh present (the pairing candidate test).
-            _tipBones = new Transform[_cache.Length];   // k_f_dan_end (BP target marker).
-            _entryBones = new Transform[_cache.Length];   // k_f_dan_entry (ENTRY marker - the pairing key).
-            _danTipBones = new Transform[_cache.Length];   // DEEPEST cm_j_dan* shaft bone = visual mesh tip.
-            _danShaftBones = new Transform[_cache.Length][];   // full shaft chain (base..tip).
+            _hasPenis = new bool[_cache.Length];             // real penis mesh present (the pairing candidate test)
+            _tipBones = new Transform[_cache.Length];        // k_f_dan_end (BP target marker)
+            _entryBones = new Transform[_cache.Length];      // k_f_dan_entry (ENTRY marker — the pairing key)
+            _danTipBones = new Transform[_cache.Length];     // DEEPEST cm_j_dan* shaft bone = visual mesh tip
+            _danShaftBones = new Transform[_cache.Length][]; // full shaft chain (base..tip)
             for (int ci = 0; ci < _cache.Length; ci++)
             {
                 var cc = _cache[ci] as Component;
@@ -364,7 +369,7 @@ namespace LiquidWobbleMPB
                     if (t.name == "k_f_dan_end") _tipBones[ci] = t;
                     if (t.name == "k_f_dan_entry") _entryBones[ci] = t;
                     string nl = t.name.ToLowerInvariant();
-                    if (!nl.StartsWith("cm_j_dan") || nl.Contains("tama")) continue;   // penis shaft bones only (exclude balls).
+                    if (!nl.StartsWith("cm_j_dan") || nl.Contains("tama")) continue;   // penis shaft bones only (exclude balls)
                     int depth = 0; var p = t.parent;
                     while (p != null) { var pl = p.name.ToLowerInvariant(); if (pl.StartsWith("cm_j_dan") && !pl.Contains("tama")) depth++; p = p.parent; }
                     if (depth > bestDanDepth) { bestDanDepth = depth; deepest = t; }
@@ -401,14 +406,14 @@ namespace LiquidWobbleMPB
                 var oc = _cache[i] as Component;
                 if (oc == null) continue;
                 string nm = oc.gameObject.name;
-                if (wearer != null && oc.gameObject == wearer.gameObject) continue;   // her own womb.
-                if (!OwnsPenis(i)) continue;   // a real penis mesh, not a name: female-bodied penetrators count.
+                if (wearer != null && oc.gameObject == wearer.gameObject) continue;   // her own womb
+                if (!OwnsPenis(i)) continue;   // a real penis mesh, not a name: female-bodied penetrators count
                 Transform entry = (i < _entryBones.Length) ? _entryBones[i] : null;
                 if (entry == null) continue;
                 Vector3 rel = entry.position - wombEntrance;
-                float along = Vector3.Dot(rel, wombAxis);   // + = up the channel (into the uterus), - = below the mouth (expected).
-                float lateral = (rel - wombAxis * along).magnitude;   // perpendicular distance from the channel axis line.
-                bool valid = along <= 0.05f && along >= -maxRange && lateral <= maxRange;   // at/below the mouth, on-axis, in range.
+                float along = Vector3.Dot(rel, wombAxis);                 // + = up the channel (into the uterus), - = below the mouth (expected)
+                float lateral = (rel - wombAxis * along).magnitude;       // perpendicular distance from the channel axis line
+                bool valid = along <= 0.05f && along >= -maxRange && lateral <= maxRange;   // at/below the mouth, on-axis, in range
                 if (dbg != null) dbg.Append(nm).Append("(lat=").Append(Mathf.RoundToInt(lateral * 1000f)).Append(",alng=").Append(Mathf.RoundToInt(along * 1000f)).Append("mm) ");
                 if (!valid) continue;
                 if (nm == currentName) curLat = lateral;
@@ -434,9 +439,9 @@ namespace LiquidWobbleMPB
             {
                 var oc = _cache[i] as Component;
                 if (oc == null) continue;
-                if (wearer != null && oc.gameObject == wearer.gameObject) continue;   // her own womb.
+                if (wearer != null && oc.gameObject == wearer.gameObject) continue;   // her own womb
                 string nm = oc.gameObject.name;
-                if (!OwnsPenis(i)) continue;   // a real penis mesh, not a name: female-bodied penetrators count.
+                if (!OwnsPenis(i)) continue;   // a real penis mesh, not a name: female-bodied penetrators count
                 Transform entry = (i < _entryBones.Length) ? _entryBones[i] : null;
                 Vector3 p = entry != null ? entry.position : oc.transform.position;
                 float d = (p - point).sqrMagnitude;
@@ -502,7 +507,7 @@ namespace LiquidWobbleMPB
 
             EnsureCache();
             if (_cache.Length == 0) return false;
-            if (!byNearest) r.found = true;   // legacy semantics: found once any controller exists.
+            if (!byNearest) r.found = true;   // legacy semantics: found once any controller exists
 
             float bestDepth = float.NegativeInfinity;
             float bestDistSq = float.PositiveInfinity;
@@ -515,8 +520,8 @@ namespace LiquidWobbleMPB
                     var fc = o as Component;
                     if (fc == null) continue;
                     string cnm = fc.gameObject.name;
-                    if (!OwnsPenis(i)) continue;   // a real penis mesh, not a name: female-bodied penetrators count.
-                    if (lockName != null && cnm != lockName) continue;   // LOCK: read only the paired penis.
+                    if (!OwnsPenis(i)) continue;   // a real penis mesh, not a name: female-bodied penetrators count
+                    if (lockName != null && cnm != lockName) continue;                                  // LOCK: read only the paired penis
                 }
                 object dan = (o != null && _fDan != null) ? _fDan.GetValue(o) : null;
                 if (dan == null) continue;
@@ -537,34 +542,34 @@ namespace LiquidWobbleMPB
 
                 // Girth = the colliders' WORLD radius (m_Radius * transform.lossyScale).
                 float gBase = 0f, gTip = 0f;
-                Vector3 firstP = Vector3.zero, lastP = Vector3.zero; int pcnt = 0;   // DEBUG tip pose.
-                _gPosBuf.Clear(); _gRadBuf.Clear();   // per-collider girth PROFILE (pos + world radius).
+                Vector3 firstP = Vector3.zero, lastP = Vector3.zero; int pcnt = 0;   // DEBUG tip pose
+                _gPosBuf.Clear(); _gRadBuf.Clear();                                  // per-collider girth PROFILE (pos + world radius)
                 var colList = _danColliders != null ? _danColliders.GetValue(dan) as IList : null;
                 if (colList != null && colList.Count > 0)
                 {
                     float s = 0f; int cnt = 0;
-                    for (int ci = 0; ci < colList.Count; ci++)   // indexed (not foreach): IList.GetEnumerator boxes the struct enumerator every frame.
+                    for (int ci = 0; ci < colList.Count; ci++)   // indexed (not foreach): IList.GetEnumerator boxes the struct enumerator every frame
                     {
                         var c = colList[ci];
                         if (c == null) continue;
                         if (_colRadius == null) _colRadius = c.GetType().GetField("m_Radius", BF);
-                        float rr = ReadF(_colRadius, c, 0f);
+                        float rr = ReadF(_colRadius, c, 0f);   // b750: compiled accessor, no boxing
                         float sc = 1f;
                         var comp = c as Component;
                         if (comp != null)
                         {
                             Vector3 ls = comp.transform.lossyScale; sc = Mathf.Max(ls.x, Mathf.Max(ls.y, ls.z));
-                            if (pcnt == 0) firstP = comp.transform.position;   // base end (collider 0).
-                            lastP = comp.transform.position;   // tip end (last collider).
-                            gTip = rr * sc;   // WORLD radius at the tip = the girth the womb actually contacts.
+                            if (pcnt == 0) firstP = comp.transform.position;   // base end (collider 0)
+                            lastP = comp.transform.position;                   // tip end (last collider)
+                            gTip = rr * sc;                                    // WORLD radius at the tip = the girth the womb actually contacts
                             pcnt++;
-                            _gPosBuf.Add(comp.transform.position); _gRadBuf.Add(rr * sc);   // world pos + WORLD radius at this point on the shaft.
+                            _gPosBuf.Add(comp.transform.position); _gRadBuf.Add(rr * sc);   // world pos + WORLD radius at this point on the shaft
                         }
                         s += rr * sc; cnt++;
                     }
                     if (cnt > 0) gBase = s / cnt;
                 }
-                if (gBase <= 1e-6f && _danRad != null)   // fallback.
+                if (gBase <= 1e-6f && _danRad != null) // fallback
                 {
                     var list = _danRad.GetValue(dan) as IList;
                     if (list != null && list.Count > 0)
@@ -580,7 +585,7 @@ namespace LiquidWobbleMPB
                 {
                     if (lockName != null)
                     {
-                        take = true;   // LOCK mode: this IS the womb's already-paired penis (the only one reaching here).
+                        take = true;   // LOCK mode: this IS the womb's already-paired penis (the only one reaching here)
                     }
                     else
                     {
@@ -595,7 +600,7 @@ namespace LiquidWobbleMPB
                             candPos = oc.transform.position; allow = maxRange * 3f;
                         }
                         float dSq = (candPos - anchor).sqrMagnitude;
-                        if (dSq > allow * allow) continue;   // out of range.
+                        if (dSq > allow * allow) continue;     // out of range
                         take = dSq < bestDistSq;
                         if (take) bestDistSq = dSq;
                     }
@@ -637,8 +642,8 @@ namespace LiquidWobbleMPB
                     else r.shaftPos = null;
                     r.aimedValid  = tb != null;
                     r.aimedTipPos = tb != null ? tb.position : r.tipPos;
-                    r.girthTip    = gTip > 1e-6f ? gTip : gBase;   // tip girth (fall back to the average if no per-collider read).
-                    // girth PROFILE for per-ring taper (the girth SCAN above still runs.
+                    r.girthTip    = gTip > 1e-6f ? gTip : gBase;   // tip girth (fall back to the average if no per-collider read)
+                    // girth PROFILE for per-ring taper (the girth SCAN above still runs — girthTip needs it)
                     if (wantProfile && _gPosBuf.Count > 0) { r.girthPos = _gPosBuf.ToArray(); r.girthRad = _gRadBuf.ToArray(); }
                     else { r.girthPos = null; r.girthRad = null; }
                 }
@@ -704,7 +709,7 @@ namespace LiquidWobbleMPB
             // distinct string.
             if (_metaFilter == null || _metaFilter != nameFilter) RebuildColliderMeta(nameFilter);
             float rangeSq = maxRange * maxRange;
-            float maxAlong = 1.5f * canalLen;   // auto-mode centre upper bound (1.5x canal = generous overshoot room).
+            float maxAlong = 1.5f * canalLen;        // auto-mode centre upper bound (1.5x canal = generous overshoot room)
             float best = 0f; bool found = false;
             for (int i = 0; i < _cache.Length; i++)
             {
@@ -712,23 +717,26 @@ namespace LiquidWobbleMPB
                 Transform t = comp.transform;
                 Vector3 ctr = t.TransformPoint(_cCenter[i]);
                 Vector3 d = ctr - entrance;
-                if (d.sqrMagnitude > rangeSq) continue;   // cheap float reject first.
-                if (named && !_nameOk[i]) continue;   // precomputed at refresh.
+                if (d.sqrMagnitude > rangeSq) continue;                  // cheap float reject FIRST
+                if (named && !_nameOk[i]) continue;                      // precomputed at refresh
                 float cAlong = Vector3.Dot(d, axisDir);
-                float cLat = (d - cAlong * axisDir).magnitude;   // centre's perpendicular offset from the axis.
+                float cLat = (d - cAlong * axisDir).magnitude;           // centre's perpendicular offset from the axis
                 float h = _cHeight[i];
                 float r = _cRadius[i];
                 int dir = _cDir[i];
                 Vector3 axis  = dir == 0 ? Vector3.right : (dir == 2 ? Vector3.forward : Vector3.up);
                 Vector3 ls = t.lossyScale; float sc = Mathf.Max(ls.x, Mathf.Max(ls.y, ls.z));
                 float radW = r * sc;
-                // A capsule = the segment between its two SPHERE centres (at +/- (height/2.
-                Vector3 halfV = t.TransformVector(axis * Mathf.Max(h * 0.5f - r, 0f));   // to the sphere centres.
+                // A capsule = the segment between its two SPHERE centres (at +/- (height/2 - radius) along the
+                // axis) inflated by `radius`. Find the deeper sphere centre, then the deepest SURFACE point is
+                // that + radius. Counting the radius is what lets a FAT collider sitting AT the entrance (its
+                // body overlapping the canal) read as inserted even when its axis doesn't point up the canal.
+                Vector3 halfV = t.TransformVector(axis * Mathf.Max(h * 0.5f - r, 0f));   // to the sphere centres
                 Vector3 e1 = ctr + halfV, e2 = ctr - halfV;
                 float a1 = Vector3.Dot(e1 - entrance, axisDir), a2 = Vector3.Dot(e2 - entrance, axisDir);
                 Vector3 dEnd, sEnd; float dA;
                 if (a1 >= a2) { dEnd = e1; sEnd = e2; dA = a1; } else { dEnd = e2; sEnd = e1; dA = a2; }
-                float reach = dA + radW;   // deepest surface point along the canal.
+                float reach = dA + radW;                                 // deepest surface point along the canal
 
                 // CONTAINMENT (both modes): the collider's deeper end (its "tip") must be laterally inside
                 // the canal -- within lateralMax of the axis -- i.e.
@@ -737,30 +745,34 @@ namespace LiquidWobbleMPB
                 float   tipLat   = (tipRel - tipAlong * axisDir).magnitude;
                 // Lateral tolerance = the womb's BULB radius (its own half-width), FLAT at all depths.
                 float maxLatTip = Mathf.Max(lateralMax, bulbRadius);
-                if (tipLat > maxLatTip) continue;   // tip beyond the womb's width -> outside, don't react.
+                if (tipLat > maxLatTip) continue;                        // tip beyond the womb's width -> outside, don't react
 
-                // ALONG-AXIS bound (both modes): reject a collider whose whole body sits ABOVE the canal top
-                // -- its SHALLOW (near) end is already past the top by more than the in-canal slop.
-                float nearAlong = Mathf.Min(a1, a2) - radW;   // shallowest surface point along the axis.
-                if (nearAlong > canalLen + lateralMax) continue;   // whole body above the womb top -> out of range.
+                // ALONG-AXIS bound (BOTH modes): reject a collider whose WHOLE body sits ABOVE the canal top --
+                // its SHALLOW (near) end is already past the top by more than the in-canal slop. That's a collider
+                // resting on/above the womb, not inserted THROUGH it (real insertion enters from BELOW, so the near
+                // end stays in the canal even when the tip overshoots the top). Together with reach>0 below (which
+                // rejects a collider entirely BELOW the entrance) the collider body must OVERLAP the canal range
+                // [0, canalLen] -> a "clearly out of range" collider (above OR below) can't drive the womb.
+                float nearAlong = Mathf.Min(a1, a2) - radW;             // shallowest surface point along the axis
+                if (nearAlong > canalLen + lateralMax) continue;        // whole body above the womb top -> out of range
 
                 if (!named)
                 {
-                    if (cAlong <= 0f || cAlong > maxAlong) continue;   // body CENTRE must be inside the canal range.
-                    if (cLat > lateralMax) continue;   // off to the side.
-                    if (radW > maxRadius) continue;   // too fat -> a character body collider.
-                }   // (named mode: name match at loop top is enough).
-                if (reach <= 0f) continue;   // not even the collider SURFACE reaches above the entrance -> outside.
-                // PER-RING: this collider's body spans canal along [nearAlong, reach]; contribute its radius
-                // to every ring it covers, keeping the MAX (thickest collider wins per ring).
+                    if (cAlong <= 0f || cAlong > maxAlong) continue;     // body CENTRE must be inside the canal range
+                    if (cLat > lateralMax) continue;                     // off to the side
+                    if (radW > maxRadius) continue;                      // too fat -> a character body collider
+                }                                                        // (named mode: name match at loop top is enough)
+                if (reach <= 0f) continue;                               // not even the collider SURFACE reaches above the entrance -> outside
+                // PER-RING: this collider's body spans canal along [nearAlong, reach]; contribute its radius to every
+                // ring it covers, keeping the MAX (thickest collider wins per ring). Runs for ALL qualifying colliders.
                 if (outRingRadius != null && ringDepths != null)
                     for (int rk = 0; rk < ringDepths.Length && rk < outRingRadius.Length; rk++)
                     {
                         float ra = ringDepths[rk] * canalLen;
                         if (ra >= nearAlong && ra <= reach && radW > outRingRadius[rk]) outRingRadius[rk] = radW;
                     }
-                float drive = reach;   // depth tracks the deepest surface (responsive; fat/long colliders read deep).
-                if (drive <= best) continue;   // keep the deepest.
+                float drive = reach;                                     // depth tracks the deepest surface (responsive; fat/long colliders read deep)
+                if (drive <= best) continue;                             // keep the deepest
                 best = drive; tip = dEnd; baseEnd = sEnd; radiusWorld = radW; driveAlong = drive; lateralOut = cLat;
                 chosenName = comp.name; found = true;
             }
@@ -770,8 +782,8 @@ namespace LiquidWobbleMPB
         // Match the filter against the collider's GameObject name OR any of its parents (KKPE may put a
         // unique id on a guide parent).
         private static string _metaFilter;
-        private static string[] _filterParts = new string[0];   // pre-trimmed entries.
-        private static string[] _filterBracket = new string[0];   // pre-built "[" + entry.
+        private static string[] _filterParts = new string[0];     // pre-trimmed entries
+        private static string[] _filterBracket = new string[0];   // pre-built "[" + entry
         private static bool[] _nameOk = new bool[0];
         private static Vector3[] _cCenter = new Vector3[0];
         private static float[] _cHeight = new float[0], _cRadius = new float[0];
@@ -840,7 +852,7 @@ namespace LiquidWobbleMPB
                 float r = _fRadius != null ? Convert.ToSingle(_fRadius.GetValue(comp)) : 0f;
                 Vector3 ls = t.lossyScale; float sc = Mathf.Max(ls.x, Mathf.Max(ls.y, ls.z));
                 string chain = comp.name; Transform pt = t.parent; int up = 0;
-                while (pt != null && up < 6) { chain += "<" + pt.name; pt = pt.parent; up++; }   // full hierarchy -> find a unique handle.
+                while (pt != null && up < 6) { chain += "<" + pt.name; pt = pt.parent; up++; }   // full hierarchy -> find a unique handle
                 sb.Append(string.Format("[{0} | d={1:F2} r={2:0}mm id={3}]  ", chain, canalLen > 1e-4f ? cAlong / canalLen : 0f, r * sc * 1000f, comp.GetInstanceID()));
                 shown++;
             }
@@ -855,7 +867,7 @@ namespace LiquidWobbleMPB
             if (_colType == null) return "no DynamicBoneCollider type";
             if (_cache == null || _cache.Length == 0) return "no colliders cached";
             bool named = !string.IsNullOrEmpty(nameFilter);
-            if (_metaFilter == null || _metaFilter != nameFilter) RebuildColliderMeta(nameFilter);
+            if (_metaFilter == null || _metaFilter != nameFilter) RebuildColliderMeta(nameFilter);   // b749
             float rangeSq = maxRange * maxRange, maxAlong = 1.5f * canalLen;
             int nameMatched = 0, inRange = 0; var sb = new System.Text.StringBuilder();
             for (int i = 0; i < _cache.Length; i++)
@@ -901,36 +913,39 @@ namespace LiquidWobbleMPB
     {
         private const BindingFlags BF = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         private const BindingFlags SBF = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
-        private const string DanGroupProbeBone = "cm_J_dan101_00";   // first penis dan bone - its FK group IS the penis group.
+        private const string DanGroupProbeBone = "cm_J_dan101_00";   // first penis dan bone — its FK group IS the penis group
 
         private static bool _tried;
         private static bool _ok;
         // OCIChar.
         private static Type _ociCharType;
-        private static MethodInfo _activeFK;   // ActiveFK(BoneGroup,bool,bool).
-        private static FieldInfo _charInfoF;   // OCIChar.charInfo (ChaControl).
-        private static FieldInfo _fkCtrlF;   // OCIChar.fkCtrl.
-        // FKCtrl.listBones -> TargetInfo.group / .enable (per-group active read, KKPE-style).
+        private static MethodInfo _activeFK;          // ActiveFK(BoneGroup,bool,bool)
+        private static FieldInfo _charInfoF;          // OCIChar.charInfo (ChaControl)
+        private static FieldInfo _fkCtrlF;            // OCIChar.fkCtrl
+        // FKCtrl.listBones -> TargetInfo.group / .enable (per-group active read, KKPE-style)
         private static FieldInfo _listBonesF;
         private static FieldInfo _tiGroupF, _tiEnableF;
-        // KK_AdditionalFKNodes static dicts + BoneInfo shape + Tools.GetBoneGroup.
-        private static FieldInfo _addBoneDictF;   // additionalBoneInfoDictionary.
-        private static FieldInfo _biBoneF, _biGroupF;   // BoneInfo.bone / .group.
-        private static MethodInfo _getBoneGroupM;   // Tools.GetBoneGroup(int)->BoneGroup.
-        // Studio object dict to resolve OCIChar from a ChaControl.
+        // KK_AdditionalFKNodes static dicts + BoneInfo shape + Tools.GetBoneGroup
+        private static FieldInfo _addBoneDictF;       // additionalBoneInfoDictionary
+        private static FieldInfo _biBoneF, _biGroupF; // BoneInfo.bone / .group
+        private static MethodInfo _getBoneGroupM;     // Tools.GetBoneGroup(int)->BoneGroup
+        // Studio object dict to resolve OCIChar from a ChaControl
         private static Type _studioType;
         private static PropertyInfo _studioInstProp;
         private static FieldInfo _studioInstFieldF;
         private static FieldInfo _dicObjectCtrlF;
-        // Per-bone FK disable (build 346): OCIChar.listBones (List<BoneInfo>) -> BoneInfo.guideObject ->
-        // GuideObject.transformTarget.
-        private static FieldInfo _ociListBonesF;   // OCIChar.listBones.
-        // BoneInfo.guideObject + GuideObject.transformTarget are PROPERTIES in Studio (auto-properties).
+        // Per-bone FK disable (build 346): OCIChar.listBones (List<BoneInfo>) -> BoneInfo.guideObject -> GuideObject.transformTarget.
+        // Nulling a dan bone's transformTarget makes KK_AdditionalFKNodes' own GuideObject.LateUpdate prefix skip it
+        // (returns false when transformTarget==null) -> FK writes nothing -> stateless BP owns the bend live.
+        private static FieldInfo _ociListBonesF;   // OCIChar.listBones
+        // BoneInfo.guideObject + GuideObject.transformTarget are PROPERTIES in Studio (auto-properties) — GetField
+        // returned null (the build-346 bug); bind via GetProperty, with a <name>k__BackingField field fallback.
         private static PropertyInfo _obiGuidePropP; private static FieldInfo _obiGuideF; private static bool _guideBound;
         private static PropertyInfo _goTargetPropP; private static FieldInfo _goTargetF; private static bool _tgtBound;
-        private static MethodInfo _goSetActiveM;   // GuideObject.SetActive(bool,bool) - deactivate a dan guide (build 353).
-        private static FieldInfo _tiTransformF;   // TargetInfo.m_Transform (diag: match fkCtrl bones by name).
-        // TargetInfo.enable/.group are PROPERTIES in this Studio build (GetField returned null -> fkEn=?
+        private static MethodInfo _goSetActiveM;   // GuideObject.SetActive(bool,bool) — deactivate a dan guide (build 353)
+        private static FieldInfo _tiTransformF;   // TargetInfo.m_Transform (diag: match fkCtrl bones by name)
+        // TargetInfo.enable/.group are PROPERTIES in this Studio build (GetField returned null -> fkEn=? in build 351).
+        // Bind field-OR-property lazily off the live TargetInfo type and read/write through whichever exists.
         private static PropertyInfo _tiEnableP, _tiGroupP; private static bool _tiMembersBound;
         private static void BindTiMembers(object ti)
         {
@@ -962,7 +977,7 @@ namespace LiquidWobbleMPB
                     if (m.Name == "ActiveFK" && m.GetParameters().Length == 3) { _activeFK = m; break; }
                 _charInfoF = _ociCharType.GetField("charInfo", BF);
                 _fkCtrlF   = _ociCharType.GetField("fkCtrl", BF);
-                _ociListBonesF = _ociCharType.GetField("listBones", BF);   // OCIChar.listBones (BoneInfo carries the per-bone GuideObject).
+                _ociListBonesF = _ociCharType.GetField("listBones", BF);   // OCIChar.listBones (BoneInfo carries the per-bone GuideObject)
 
                 var fkCtrlType = FindType("Studio.FKCtrl") ?? FindType("FKCtrl") ?? (_fkCtrlF != null ? _fkCtrlF.FieldType : null);
                 _listBonesF = fkCtrlType != null ? fkCtrlType.GetField("listBones", BF) : null;
@@ -989,9 +1004,9 @@ namespace LiquidWobbleMPB
                     _dicObjectCtrlF = _studioType.GetField("dicObjectCtrl", BF);
                 }
 
-                // _biBoneF/_biGroupF (BoneInfo) and _tiGroupF/_tiEnableF (TargetInfo) are bound per-value
-                // off the live runtime type at use, so they are NOT part of the readiness gate (their type names vary by build).
-                _ok = _charInfoF != null && _dicObjectCtrlF != null && _ociListBonesF != null;   // DisableDanFK needs only ResolveOciChar + OCIChar.listBones.
+                // _biBoneF/_biGroupF (BoneInfo) and _tiGroupF/_tiEnableF (TargetInfo) are bound per-value off the
+                // live runtime type at use, so they are NOT part of the readiness gate (their type names vary by build).
+                _ok = _charInfoF != null && _dicObjectCtrlF != null && _ociListBonesF != null;   // DisableDanFK needs only ResolveOciChar + OCIChar.listBones
                 if (!_ok)
                     LiquidWobbleMPBPlugin._logger?.LogWarning(
                         "PenisFKBridge: a reflection lookup failed — penis-bend disable unavailable. " +
@@ -1035,11 +1050,11 @@ namespace LiquidWobbleMPB
                 if (string.IsNullOrEmpty(bone)) continue;
                 string bl = bone.ToLowerInvariant();
                 if (bl.Contains("dan")) { danNames.Add(bone); if (firstDanGrp == int.MinValue) firstDanGrp = Convert.ToInt32(groupF.GetValue(bi)); }
-                if (bl == probeLower) probeGrp = Convert.ToInt32(groupF.GetValue(bi));   // case-insensitive probe.
+                if (bl == probeLower) probeGrp = Convert.ToInt32(groupF.GetValue(bi));   // case-insensitive probe
             }
-            int grp = probeGrp != int.MinValue ? probeGrp : firstDanGrp;   // prefer the exact probe, else any dan bone's group.
+            int grp = probeGrp != int.MinValue ? probeGrp : firstDanGrp;   // prefer the exact probe, else ANY dan bone's group
             if (grp == int.MinValue) return null;
-            return _getBoneGroupM.Invoke(null, new object[] { grp });   // BoneGroup.
+            return _getBoneGroupM.Invoke(null, new object[] { grp });   // BoneGroup
         }
 
         // OCIChar whose charInfo == this male's ChaControl, via Studio.Studio.Instance.dicObjectCtrl.
@@ -1093,8 +1108,8 @@ namespace LiquidWobbleMPB
                 if (oci == null) { reason = "OCIChar not found for this male"; return false; }
                 bool fkActive = IsDanFKActive(oci, danGroup);
                 if (!fkActive) { reason = "penis FK group not active (nothing to fix)"; return false; }
-                _activeFK.Invoke(oci, new object[] { danGroup, false, false });   // off -> ResetFKNodes -> BP bend shows.
-                _activeFK.Invoke(oci, new object[] { danGroup, true,  false });   // on -> rebuild FK from BP-bent pose.
+                _activeFK.Invoke(oci, new object[] { danGroup, false, false });   // off -> ResetFKNodes -> BP bend shows
+                _activeFK.Invoke(oci, new object[] { danGroup, true,  false });   // on -> rebuild FK from BP-bent pose
                 return true;
             }
             catch (Exception e)
@@ -1143,9 +1158,9 @@ namespace LiquidWobbleMPB
                     }
                     if (_goTargetPropP == null && _goTargetF == null) { reason = "no transformTarget member"; return false; }
                     var t = (_goTargetPropP != null ? _goTargetPropP.GetValue(go, null) : _goTargetF.GetValue(go)) as Transform;
-                    if (t == null) continue;   // already disabled / no target -> idempotent.
-                    if (!danNames.Contains(t.name)) continue;   // not a dan bone -> leave the body's FK intact.
-                    if (_goTargetPropP != null && _goTargetPropP.CanWrite) _goTargetPropP.SetValue(go, null, null);   // DISABLE FK for this bone -> BP drives.
+                    if (t == null) continue;                          // already disabled / no target -> idempotent
+                    if (!danNames.Contains(t.name)) continue;          // not a dan bone -> leave the body's FK intact
+                    if (_goTargetPropP != null && _goTargetPropP.CanWrite) _goTargetPropP.SetValue(go, null, null);  // DISABLE FK for this bone -> BP drives it
                     else if (_goTargetF != null) _goTargetF.SetValue(go, null);
                     else { reason = "transformTarget not settable"; return false; }
                     disabledCount++;
@@ -1185,7 +1200,7 @@ namespace LiquidWobbleMPB
                     {
                         if (ti == null) continue;
                         var bone = TiBone(ti); if (bone == null || !danNames.Contains(bone.name)) continue;
-                        if (!TiEnable(ti)) continue;   // already off -> idempotent.
+                        if (!TiEnable(ti)) continue;                 // already off -> idempotent
                         SetTiEnable(ti, false);
                         disabled++; names.Add(bone.name.Replace("cm_J_dan", "").Replace("_00", ""));
                     }
@@ -1242,7 +1257,7 @@ namespace LiquidWobbleMPB
             try
             {
                 var ociType = HarmonyLib.AccessTools.TypeByName("Studio.OCIChar") ?? HarmonyLib.AccessTools.TypeByName("OCIChar");
-                if (ociType == null) return;   // Studio not ready yet - retry on next CharacterReloaded.
+                if (ociType == null) return;   // Studio not ready yet — retry on next CharacterReloaded
                 System.Reflection.MethodInfo m = null;
                 foreach (var mi in ociType.GetMethods(BF)) if (mi.Name == "ActiveFK" && mi.GetParameters().Length == 3) { m = mi; break; }
                 if (m == null)
@@ -1267,8 +1282,8 @@ namespace LiquidWobbleMPB
         private static bool _inside;
         private static void Postfix(object __instance, bool _active)
         {
-            if (!_active || _inside || __instance == null) return;   // only when FK is being turned.
-            if (!WombExpandEffect.EffectiveActive) return;
+            if (!_active || _inside || __instance == null) return;   // only when FK is being turned ON
+            if (!WombExpandEffect.EffectiveActive) return;            // mod off or no CloXray womb -> leave the user's penis FK alone
             try
             {
                 _inside = true;

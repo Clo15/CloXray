@@ -22,7 +22,7 @@ namespace LiquidWobbleMPB
         {
             var host = _inst ?? (_inst = UnityEngine.Object.FindObjectOfType<WobbleSceneController>());
             if (host != null && cc != null) host.StartCoroutine(host.DeferredApply(cc));
-            else AutoBodyReveal.ApplyForCharacterNow(cc);   // no host (shouldn't happen) -> immediate fallback.
+            else AutoBodyReveal.ApplyForCharacterNow(cc);   // no host (shouldn't happen) -> immediate fallback
         }
 
         // Re-make the penis links after a character load/replacement, but only once NodesConstraints has
@@ -33,7 +33,7 @@ namespace LiquidWobbleMPB
             var host = _inst ?? (_inst = UnityEngine.Object.FindObjectOfType<WobbleSceneController>());
             if (host == null || w == null)
             { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: no scene controller to defer the constraint re-link on - the penis links were NOT re-made. Press the apply hotkey to re-aim."); return; }
-            if (!_relinkPending.Add(w.GetInstanceID())) return;   // one settle-wait per womb at a time.
+            if (!_relinkPending.Add(w.GetInstanceID())) return;   // one settle-wait per womb at a time
             host.StartCoroutine(host.SettleThenRelink(w));
         }
 
@@ -55,7 +55,7 @@ namespace LiquidWobbleMPB
             }
             _relinkPending.Remove(wid);
             if (w == null) yield break;
-            AutoBodyReveal.RelinkNearWomb(w);   // resolves the CURRENT character now, post-swap.
+            AutoBodyReveal.RelinkNearWomb(w);   // resolves the CURRENT character now, post-swap
         }
 
         private System.Collections.IEnumerator DeferredApply(Component cc)
@@ -63,7 +63,7 @@ namespace LiquidWobbleMPB
             // Yield one frame first so ME's same-frame CharacterReloaded restore can run, then poll up to
             // ~5s for the saved BodyReveal copy to appear.
             yield return null;
-            const int FrameCap = 300;   // ~5s @60fps - same headroom the wobble/BP re-attach coroutines use.
+            const int FrameCap = 300;   // ~5s @60fps — same headroom the wobble/BP re-attach coroutines use
             for (int f = 0; f < FrameCap; f++)
             {
                 if (cc == null) yield break;
@@ -159,7 +159,7 @@ namespace LiquidWobbleMPB
 
         private System.Collections.IEnumerator AwaitPenisThenRelink(WombExpandEffect w, Component male)
         {
-            const int Cap = 600;   // ~10s.
+            const int Cap = 600;   // ~10s
             int f = 0;
             for (; f < Cap; f++)
             {
@@ -173,14 +173,14 @@ namespace LiquidWobbleMPB
             { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: the body-reload completion event never fired for '" + male.name + "' within 10s of restoring his penis uncensor - press the apply hotkey."); yield break; }
             yield return null;
             if (w == null || male == null) yield break;
-            AutoBodyReveal.RelinkNearWomb(w);   // resolves the wearer itself and re-makes both links.
+            AutoBodyReveal.RelinkNearWomb(w);   // resolves the wearer itself and re-makes both links
         }
 
         private System.Collections.IEnumerator AwaitBodyThenApply(WombExpandEffect w, Component cc)
         {
-            // Event-driven: UncBodyReloadWatch's postfix marks the exact frame the body swap finished (armed
-            // by SetBodyUncensorGuid).
-            const int Cap = 600;   // ~10s: if the completion event never fires, say so loudly and stop.
+            // Event-driven: UncBodyReloadWatch's postfix marks the exact frame the body swap finished
+            // (armed by SetBodyUncensorGuid). No bone polling, no fixed settle delay.
+            const int Cap = 600;   // ~10s: if the completion event never fires, say so loudly and stop
             int f = 0;
             for (; f < Cap; f++)
             {
@@ -192,7 +192,7 @@ namespace LiquidWobbleMPB
             if (w == null || cc == null) yield break;
             if (f >= Cap)
             { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: the body-reload completion event never fired for '" + cc.name + "' within 10s of the uncensor restore - press the apply hotkey."); yield break; }
-            yield return null;   // one frame - MaterialEditor's own reload hooks finish registering the new body.
+            yield return null;   // one frame - MaterialEditor's own reload hooks finish registering the new body
             if (w == null || cc == null) yield break;
             if (!AutoBodyReveal.HasVaginaBone(cc))
             { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: '" + cc.name + "' reloaded without cf_J_Vagina_root - the restored uncensor has no BP vagina; the penis links were not re-made."); yield break; }
@@ -218,9 +218,9 @@ namespace LiquidWobbleMPB
 
         protected override void OnSceneLoad(SceneOperationKind operation, ReadOnlyDictionary<int, ObjectCtrlInfo> loadedItems)
         {
-            _inst = this;   // ensure the deferred-apply coroutine host is available.
-            if (operation != SceneOperationKind.Clear) AutoBodyReveal.MarkSceneLoadStarted();   // closed by StudioSaveLoadApi.SceneLoad.
-            _bpRebindPairs.Clear();   // womb/character objects die with the outgoing scene.
+            _inst = this;   // ensure the deferred-apply coroutine host is available
+            if (operation != SceneOperationKind.Clear) AutoBodyReveal.MarkSceneLoadStarted();   // closed by StudioSaveLoadApi.SceneLoad
+            _bpRebindPairs.Clear();   // womb/character objects die with the outgoing scene
             if (_capturePoll != null) StopCoroutine(_capturePoll);
             _capturePoll = StartCoroutine(WearerCapturePoll());
             if (operation == SceneOperationKind.Clear) return;
@@ -253,7 +253,7 @@ namespace LiquidWobbleMPB
             // frame-cap, or normal completion) so the next load re-arms.
             try
             {
-                const int FrameCap = 300;   // ~5s @60fps - headroom for BP's lazy assembly + resetDelay.
+                const int FrameCap = 300;   // ~5s @60fps — headroom for BP's lazy assembly + resetDelay
                 int frames = 0;
                 while (frames < FrameCap)
                 {
@@ -264,7 +264,7 @@ namespace LiquidWobbleMPB
                     foreach (var m in males)
                     {
                         if (m.chaControl == null) continue;
-                        if (BPDanReaddGuard.FindDanEnd(m.chaControl) == null) continue;   // no penis -> ignore.
+                        if (BPDanReaddGuard.FindDanEnd(m.chaControl) == null) continue;   // no penis -> ignore
                         anyPenis = true;
                         if (!m.danTargetsValid) ready = false;
                     }
@@ -277,15 +277,15 @@ namespace LiquidWobbleMPB
                 // CloXray womb.
                 for (int g = 0; g < 120 && !WombExpandEffect.EffectiveActive; g++) yield return null;
                 if (!WombExpandEffect.EffectiveActive) yield break;
-                AutoBodyReveal.InstallWombHooks();   // BP is up and a womb is present (mod on) -> ensure the interop patches.
+                AutoBodyReveal.InstallWombHooks();   // BP is up and a womb is present (mod on) -> ensure the interop patches are in
 
                 var males2 = BPBridge.EnumerateMales();
                 foreach (var m in males2)
                 {
                     var cc = m.chaControl;
                     if (cc == null) continue;
-                    if (BPDanReaddGuard.FindDanEnd(cc) == null) continue;   // no penis (e.g. the female) -> skip.
-                    if (!m.danTargetsValid) continue;   // BP not driving this male yet -> leave FK alone.
+                    if (BPDanReaddGuard.FindDanEnd(cc) == null) continue;              // no penis (e.g. the female) -> skip
+                    if (!m.danTargetsValid) continue;                                  // BP not driving this male yet -> leave FK alone
 
                     // BUILD 353 = CURE. The penis dan FK nodes (103/105/107 + foreskin 119) sit in BoneGroup
                     // BODY, shared with the whole skeleton, so a group toggle is out.
@@ -320,12 +320,12 @@ namespace LiquidWobbleMPB
                 bool pending = false;
                 foreach (var id in ids)
                 {
-                    if (!loadedItems.ContainsKey(id)) continue;   // KKAPI remaps saved ids -> loaded items (handles import).
+                    if (!loadedItems.ContainsKey(id)) continue;        // KKAPI remaps saved ids -> loaded items (handles import)
                     var oci = loadedItems[id];
                     var tt = (oci != null && oci.guideObject != null) ? oci.guideObject.transformTarget : null;
                     if (tt == null) continue;
-                    if (tt.GetComponentInChildren<LiquidWobbleMPBEffect>(true) != null) continue;   // already attached.
-                    AutoBodyReveal.AttachWobbleTo(tt.gameObject);   // attaches only once the liquid material is present.
+                    if (tt.GetComponentInChildren<LiquidWobbleMPBEffect>(true) != null) continue;   // already attached
+                    AutoBodyReveal.AttachWobbleTo(tt.gameObject);                                     // attaches only once the liquid material is present
                     if (tt.GetComponentInChildren<LiquidWobbleMPBEffect>(true) == null) pending = true;
                 }
                 if (!pending) yield break;

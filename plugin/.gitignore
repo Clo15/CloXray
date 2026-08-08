@@ -330,3 +330,4 @@ ASALocalRun/
 .mfractor/
 
 *.DotSettings
+Directory.Build.props

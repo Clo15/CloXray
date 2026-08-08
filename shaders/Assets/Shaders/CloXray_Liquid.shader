@@ -46,7 +46,6 @@ Shader "CloXray/Liquid"
         // Setup aid: instead of clipping, tint the parts outside the box red so
         // you can see where each plane lands on the mesh. Turn off when done.
         [Toggle] _ShowSetupPhysicsBounds ("Show Setup Physics Bounds", Float) = 0
-        [Toggle] _ShowTipDebug ("Show Tip Debug (BP read)", Float) = 0
         // Rest-pos mode (hidden, not in the Material Editor). 1 = the mesh bakes each
         // vertex's REST position into UV2 and all fill math runs there - required for a
         [Toggle] _UseRestPosTangent ("Rest-Pos Mode (skinned)", Float) = 0
@@ -125,9 +124,6 @@ Shader "CloXray/Liquid"
         float _VolumeConserve_0off_1cube_2ellipsoid;
         float _Bound1MinY_bottom, _Bound2MaxY_top, _Bound3MinX_left, _Bound4MaxX_right, _Bound5MinZ_back, _Bound6MaxZ_front;
         float _ShowSetupPhysicsBounds, _UseRestPosTangent, _CapForOpenMesh;
-        // Tip-detection DEBUG (plugin-pushed; gated by _ShowTipDebug). _DebugTipPos.w=1 when valid.
-        float _ShowTipDebug, _DebugTipDepth01, _DebugTipGirth;
-        float4 _DebugTipPos, _DebugTipDir;
         float _ChamberMode_0single_1connected_2closed, _FillAmount2, _FillBottom2;
         // -- v390 "SHAPE" volume (plugin-driven, MPB-only -- no Properties entries on purpose) --
         // (neck-narrow, upper-fat), under tilt, and under any blendshape (wombbig/pregnant/
@@ -273,7 +269,7 @@ Shader "CloXray/Liquid"
             float4 vertex  : POSITION;
             float2 uv      : TEXCOORD0;
             float3 normal  : NORMAL;
-            float3 restPos : TEXCOORD2;   // rest-pos mode: baked rest mesh-local position (UV2 - NOT skinned)
+            float3 restPos : TEXCOORD2;   // rest-pos mode: baked rest mesh-local position (UV2 — NOT skinned)
         };
 
         struct v2f_liq
@@ -303,8 +299,9 @@ Shader "CloXray/Liquid"
         // Reff = arc band half-depth (world units; caller floors >= 1e-5).
         // Angle parameterization (theta=(1-t)*phi, bevel=R(1-cos theta)) keeps
         // fs = fs0 + bevel strictly increasing -> a unique transversal cut. The chord
-        static const float EDGE_SWEEP   = 1.5707963; // pi/2 - constant quarter-round (cap-edge bevel sweep)
-        // Chamber fill height in WORLD Y - ONE definition (closed-mode snap);
+        // form R(1-sqrt(1-u^2)) is non-monotonic (rim flicker) and is rejected.
+        static const float EDGE_SWEEP   = 1.5707963; // pi/2 — constant quarter-round (cap-edge bevel sweep)
+        // Chamber fill height in WORLD Y — ONE definition (closed-mode snap);
         // never re-derive this lerp elsewhere.
         float ChamberYfill(bool inCh2)
         {
@@ -377,10 +374,10 @@ Shader "CloXray/Liquid"
                                           0.5 * max(Yfill - Ybot, 0.0)), 1e-5);    // lower term = BAND depth (was full chamber)
                 float  bevel; float thArc;
                 EdgeArc(fs0, Reff, EDGE_SWEEP, bevel, thArc);
-                if (_EdgeRadius <= 1e-5) { bevel = 0.0; thArc = 0.0; }       // slider 0 -> exactly flat (uniform branch)
+                if (_EdgeRadius <= 1e-5) { bevel = 0.0; thArc = 0.0; }       // slider 0 -> EXACTLY flat (uniform branch)
                 fs = fs0 + bevel;                 // monotonic (see EdgeArc) -> unique cut
                 float fsBot = (inCh2 && _FillBottom2 > 1e-4) ? ((Ybot + _wob) - wpIn.y) : -1e30;     // >0 below the clear plane
-                fs = max(fs, fsBot);              // outside the band: above the top OR below the bottom-clear plane
+                fs = max(fs, fsBot);              // OUTSIDE the band: above the top OR below the bottom-clear plane
                 if (!empty && fsBot > 0.0 && fsBot >= fs0 + bevel)
                 {
                     // BOTTOM CAP: flat plane at Ybot, down-facing (wobble-tilted). Simple (no EdgeArc/profile) - the
@@ -548,7 +545,9 @@ Shader "CloXray/Liquid"
             LiqTessF f;
             float t = max(_CapTess, 1.0);
             // Surface band: tessellate cap + rim. In closed mode the band is widened by the
-            float s1, s2, sc; SolveFillOffsets(s1, s2, sc);
+            // edge-arc's max depth (_EdgeRadius x half-height) so the rounded rim gets the
+            // cap's subdivision. Density decision only — never the snap/cut.
+            float s1, s2, sc; SolveFillOffsets(s1, s2, sc);   // solve ONCE per patch, classify each corner (was 3 solves)
             float fmax = max(ClassifyFillSign(ip[0].restPos, s1, s2, sc),
                          max(ClassifyFillSign(ip[1].restPos, s1, s2, sc), ClassifyFillSign(ip[2].restPos, s1, s2, sc)));
             float band = 0.02 + ((_ChamberMode_0single_1connected_2closed > 1.5)
@@ -1030,7 +1029,7 @@ Shader "CloXray/Liquid"
                 float  fresnelNode = _FresnelBias
                                    + _FresnelScale * pow(1.0 - ndotv, max(_FresnelPower, 0.001));
                 float  Fresnel      = saturate(_FresnelAlpha * fresnelNode);
-                float  alphaFresnel = Fresnel * 0.10;
+                float  alphaFresnel = Fresnel * 0.10;   // mostly-uniform body: less view-transparency so cap (face-on) ~ wall (grazing); was 0.30
 
                 // ── Matcap: NORMAL-based reflect (stable under ZOOM). Was position-based, which slid
                 float3 viewNormal = normalize(mul((float3x3)UNITY_MATRIX_V, N));
@@ -1195,89 +1194,6 @@ Shader "CloXray/Liquid"
             ENDCG
         }
 
-        // ════════════════════════════════════════════════════════════════
-        // TipDebug - when _ShowTipDebug is on AND the plugin pushed a valid tip (_DebugTipPos.w>0.5),
-        // draw a WORLD-space marker at the BP tip to verify the plugin's tip read: a 3-axis crosshair,
-        Pass
-        {
-            Name "TipDebug"
-            Cull   Off
-            ZTest  Always
-            ZWrite Off
-
-            CGPROGRAM
-            #pragma target 4.0
-            #pragma vertex   vert_tip
-            #pragma geometry geom_tip
-            #pragma fragment frag_tip
-
-            struct app_tip { float4 vertex : POSITION; };
-            struct v2g_tip { float4 pos : SV_POSITION; };
-            struct g2f_tip { float4 pos : SV_POSITION; float4 col : TEXCOORD0; };
-
-            v2g_tip vert_tip(app_tip v) { v2g_tip o; o.pos = UnityObjectToClipPos(v.vertex); return o; }
-
-            float4 WClip(float3 w) { return mul(UNITY_MATRIX_VP, float4(w, 1.0)); }
-
-            // Thin screen-space quad between two CLIP-space points, carrying a colour.
-            void EmitTipEdge(float4 p0, float4 p1, float4 col, inout TriangleStream<g2f_tip> stream)
-            {
-                float2 ndc0 = p0.xy / max(abs(p0.w), 1e-5) * sign(p0.w);
-                float2 ndc1 = p1.xy / max(abs(p1.w), 1e-5) * sign(p1.w);
-                float2 d    = ndc1 - ndc0;
-                float2 dirN = d / max(length(d), 1e-5);
-                float2 perp = float2(-dirN.y, dirN.x);
-                perp.x *= _ScreenParams.y / max(_ScreenParams.x, 1.0);
-                float  hw = 0.0022;
-                float2 o0 = perp * hw * p0.w, o1 = perp * hw * p1.w;
-                g2f_tip va, vb, vc, vd;
-                va.pos = float4(p0.xy + o0, p0.z, p0.w); va.col = col;
-                vb.pos = float4(p0.xy - o0, p0.z, p0.w); vb.col = col;
-                vc.pos = float4(p1.xy + o1, p1.z, p1.w); vc.col = col;
-                vd.pos = float4(p1.xy - o1, p1.z, p1.w); vd.col = col;
-                stream.Append(va); stream.Append(vb); stream.Append(vc); stream.Append(vd);
-                stream.RestartStrip();
-            }
-
-            [maxvertexcount(128)]
-            void geom_tip(triangle v2g_tip input[3], uint primID : SV_PrimitiveID,
-                          inout TriangleStream<g2f_tip> stream)
-            {
-                if (_ShowTipDebug < 0.5)  return;          // overlay off
-                if (_DebugTipPos.w < 0.5) return;          // no valid tip pushed
-                if (primID != 0)          return;          // once per frame
-
-                float3 P     = _DebugTipPos.xyz;
-                float3 dir   = (dot(_DebugTipDir.xyz, _DebugTipDir.xyz) > 1e-6) ? normalize(_DebugTipDir.xyz) : float3(0,1,0);
-                float  g     = max(_DebugTipGirth, 1e-4);
-                float  depth = saturate(_DebugTipDepth01);
-                float4 col   = float4(lerp(float3(0.1,0.4,1.0), float3(1.0,0.2,0.1), depth), 1.0); // blue(out)->red(in)
-
-                EmitTipEdge(WClip(P - float3(g,0,0)), WClip(P + float3(g,0,0)), col, stream);
-                EmitTipEdge(WClip(P - float3(0,g,0)), WClip(P + float3(0,g,0)), col, stream);
-                EmitTipEdge(WClip(P - float3(0,0,g)), WClip(P + float3(0,0,g)), col, stream);
-
-                // Girth ring perpendicular to dir.
-                float3 up0 = abs(dir.y) < 0.9 ? float3(0,1,0) : float3(1,0,0);
-                float3 u   = normalize(cross(dir, up0));
-                float3 w   = cross(dir, u);
-                float4 prev = WClip(P + g * u);
-                [unroll] for (int k = 1; k <= 16; k++)
-                {
-                    float  a   = 6.2831853 * (float)k / 16.0;
-                    float4 cur = WClip(P + g * (cos(a) * u + sin(a) * w));
-                    EmitTipEdge(prev, cur, col, stream);
-                    prev = cur;
-                }
-
-                // Axis line along -dir (entrance side -> tip); length grows with depth.
-                float axisLen = g * 4.0 * (0.25 + 0.75 * depth);
-                EmitTipEdge(WClip(P - dir * axisLen), WClip(P), col, stream);
-            }
-
-            fixed4 frag_tip(g2f_tip i) : SV_Target { return i.col; }
-            ENDCG
-        }
     }
     Fallback Off
 }

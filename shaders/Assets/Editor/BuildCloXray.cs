@@ -25,6 +25,7 @@ public class BuildCloXray
                 assetNames = new string[]
                 {
                     "Assets/Shaders/CloXray_BodyReveal.shader",
+                    "Assets/Shaders/CloXray_DepthOnly.shader",
                     "Assets/Shaders/CloXray_Organ.shader",
                     "Assets/Shaders/CloXray_OrgInside.shader",
                     "Assets/Shaders/CloXray_Liquid.shader",
