@@ -109,8 +109,7 @@ pick all this up on the first hotkey press.
 ### X-ray machine scenes
 
 Stamped-window setups — a plane stamping `StencilRef 128` with organ items on `StencilBody 132/133`
-— work as before, nothing to set. Limb blocking marks limbs with its own region value, so stencil
-bit 7 stays free for these scenes, and her hands now block a machine window too.
+— need nothing set: stencil bit 7 is reserved for these windows, and her hands block them too.
 
 ### Penis size bias (Free-H)
 
@@ -122,8 +121,7 @@ change.
 
 ### Scenes saved before womb 7.4.1
 
-They load and work. The womb's internal bones got a `clo_` prefix in 7.4.0 so they stop clashing
-with the character's own bones in ABMX. On load:
+They load and work. The womb's internal bones were renamed (a `clo_` prefix). On load:
 
 - NodesConstraints links to womb bones are rewritten to the new names automatically — re-save the
   scene and it sticks.
