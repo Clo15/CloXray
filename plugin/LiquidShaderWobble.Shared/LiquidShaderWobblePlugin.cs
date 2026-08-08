@@ -117,7 +117,7 @@ namespace LiquidWobbleMPB
         public const float CfgHStrokeDeep      = 72f;
         public const float CfgHMoundDown       = 50f;
         public const float CfgHContactPct      = 85f;
-        // b977: un-frozen back into F1 by request - the one honest "penis slightly longer/shorter
+        // b977: un-frozen back into F1 - the one honest "penis slightly longer/shorter
         // vs the auto fit" knob. It scales the fit TARGET (where the deepest push should land
         // relative to the cervix), so the fit still measures every animation and the stroke stays
         // visible at any setting - the caps (0.6x..1.25x natural) still apply.
@@ -451,7 +451,7 @@ namespace LiquidWobbleMPB
                     && (Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt)))
                 {
                     // b692 (research, temporary): Shift+Alt+P = auto-collect — walk every H pose and
-                    // record one settled research sample each, so the campaign doesn't need manual clicking.
+                    // record one settled research sample each, so data collection doesn't need manual clicking.
                     if (Input.GetKeyDown(KeyCode.P)) MainGameWomb.ToggleAutoCollect(this);
                     bool changed = false;
                     if (Input.GetKeyDown(KeyCode.M)) { MainGameWomb.RebindNudgeMM += new Vector3(0f, 10f, 0f); changed = true; }

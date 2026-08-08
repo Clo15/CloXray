@@ -983,7 +983,7 @@ namespace LiquidWobbleMPB
                                                           + nudgeLocal);
                 // canal axis = the bone's authored local +Y, expressed in the parent (kokan) frame
                 Vector3 axisM = boneToMesh.MultiplyVector(canalLocalRot * Vector3.up).normalized;   // kept for the parity term
-                // b633 (user, ARCHITECTURAL): NO matrix-space STRETCH — ever. Deformation belongs to the
+                // b633 ARCHITECTURAL rule: NO matrix-space STRETCH — ever. Deformation belongs to the
                 // AUTHORED blendshapes only (womb_displace = elongation, rings = opening); an
                 // anisotropic matrix stretch distorts everything indiscriminately (the "stretched
                 // ovaries"). What the bake DOES carry, besides seat+nudge placement, is the UNIFORM SIZE
@@ -2065,7 +2065,7 @@ namespace LiquidWobbleMPB
                     }
                     if (fAgents != null) break;
                 }
-                if (bpAsm != null) ForceBPSimplifyConfig(bpAsm);   // fix Simplify at BP's SOURCE (user's cfg has it Disabled)
+                if (bpAsm != null) ForceBPSimplifyConfig(bpAsm);   // fix Simplify at BP's SOURCE (the cfg may have it Disabled)
                 if (fAgents == null) { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: BetterPenetration not found (no 'collisionAgents') — the Free-H womb HARD-DEPENDS on BP. Install + enable BetterPenetration."); return; }
                 _sfAgents = fAgents; _sfDans = fDans; _sWomb = w; _sMale = male; _sFemale = female;
                 // lookup).
@@ -2483,8 +2483,8 @@ namespace LiquidWobbleMPB
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: anim-profile save failed: " + e.Message); }
         }
 #if CLOXRAY_RESEARCH   // 1.1 release strip: research scaffolding compiles only in research builds (add CLOXRAY_RESEARCH to DefineConstants)
-        // b688 (user data-collection campaign: "collect extra data for this testing period; we keep only what's
-        // useful once we understand and have proof of the full mechanic"). Rich APPEND-ONLY research log, kept
+        // b688 research data collection for the testing period — the surplus columns stay only until
+        // the full mechanic is understood and proven. Rich APPEND-ONLY research log, kept
         // SEPARATE from the compact prediction table so the prediction path is untouched (zero risk) and the
         // surplus columns can simply be deleted later. One row per MOTION lock; append = no rewrite cost.
         // MOTION STATE is included deliberately: KK runs speed variants (S/M/W-Loop) under the SAME pose id,
@@ -2504,7 +2504,7 @@ namespace LiquidWobbleMPB
                 // was ABSENT, so when the columns changed (b690 settleS, b691 bone probe) an existing file kept
                 // a STALE header while the rows changed underneath it — silently mislabelled data. Now, if the
                 // existing header differs from the current one, that file is rotated aside and we start clean:
-                // two schemas can never be mixed into one CSV mid-campaign.
+                // two schemas can never be mixed into one CSV mid-collection.
                 bool needHeader = !System.IO.File.Exists(p);
                 if (!needHeader)
                 {
@@ -3562,7 +3562,7 @@ namespace LiquidWobbleMPB
         // inside-finish (the cum button) raises a burst accumulator by 'Fill on finish', eased in over a few seconds on top of the base slider.
         internal static Component s_cumOwner;
         private static float _burst;   // the finish-cum fill level (over the config base), driven by the state machine below
-        // FINISH CUM state machine (user spec): each inside-finish RISES the womb fill to a PEAK over
+        // FINISH CUM state machine: each inside-finish RISES the womb fill to a PEAK over
         // the ejaculation animation (prolonged, spurty), then eases back to a lower SETTLE level as sex
         // continues. Levels per shot #: 1 -> 0.50 peak / 0.35 settle, 2 -> 0.80 / 0.65, 3+ -> 1.00 /
         // 1.00 (stays full). Shots BEYOND full drive the DOME EXPAND (wombbig + ovary_shrink). Reset on

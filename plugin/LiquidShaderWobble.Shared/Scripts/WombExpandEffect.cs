@@ -713,8 +713,8 @@ namespace LiquidWobbleMPB
                 _calN = 0; _calSumEnt = Vector3.zero; _calSumTop = Vector3.zero; _calSumDia = 0f; _calDiaN = 0; _calPrevFrac = -1f;   // restart the window
             }
         }
-        // b624 PHASE-LOCKED calibration (user's idea: "catch the loop, measure at the same frame each
-        // time"). The idle animation is LOOPED, so sampling at one fixed normalized phase sees the SAME
+        // b624 PHASE-LOCKED calibration — catch the loop, measure at the same frame each time.
+        // The idle animation is LOOPED, so sampling at one fixed normalized phase sees the SAME
         // stance every time — stance shifts stop being noise by construction (b618's time-window average
         // could not fix this: stance switching is state noise, not zero-mean sway; each spawn's window
         // caught a different stance mix and the bone landed ±5mm differently). CalPhase is one global
@@ -1890,7 +1890,7 @@ namespace LiquidWobbleMPB
                         Vector3 ld = -_smr.transform.InverseTransformDirection(lat);   // womb-local lean dir, sign-corrected
                         float lz = Mathf.Clamp(ld.z * 3f, -1f, 1f);
                         float lx = Mathf.Clamp(ld.x * 3f, -1f, 1f);
-                        const float sideScale = 0.5f;   // L/R lean = HALF of fwd/back (per the human — sideways lean was too strong)
+                        const float sideScale = 0.5f;   // L/R lean = HALF of fwd/back (full-strength sideways lean read too strong)
                         fwd   = Mathf.Sqrt(Mathf.Max(0f,  lz)) * DirReactWeight;              back  = Mathf.Sqrt(Mathf.Max(0f, -lz)) * DirReactWeight;
                         right = Mathf.Sqrt(Mathf.Max(0f,  lx)) * DirReactWeight * sideScale;  left  = Mathf.Sqrt(Mathf.Max(0f, -lx)) * DirReactWeight * sideScale;
                     }
