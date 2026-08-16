@@ -461,6 +461,22 @@ namespace LiquidWobbleMPB
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: geometry audit failed: " + e.Message); }
         }
 
+        /// <summary>The stencil ref actually live on her BodyReveal copy, or -1. This is the half of a
+        /// pair that MaterialEditor persists, so after a load it says which pair the scene was built
+        /// on.</summary>
+        internal static int ReadBodyStencilRef(Component cc)
+        {
+            if (cc == null) return -1;
+            foreach (var r in cc.GetComponentsInChildren<Renderer>(true))
+            {
+                if (r == null || r.sharedMaterials == null) continue;
+                foreach (var m in r.sharedMaterials)
+                    if (m != null && m.shader != null && m.shader.name == BodyRevealShader && m.HasProperty("_StencilRef"))
+                        return Mathf.RoundToInt(m.GetFloat("_StencilRef"));
+            }
+            return -1;
+        }
+
         // Hand MaterialEditor back every CloXray copy on this character. MaterialCopyRemove is a
         // TOGGLE keyed on the SOURCE material, so one call per copy; each is verified against the
         // MaterialCopyList so a silent no-op cannot leave a half-stripped character behind.
@@ -3169,6 +3185,10 @@ namespace LiquidWobbleMPB
                 if (Debug) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: '" + cc.name + "' wears no womb (not parented to one, none within " + MaxRange.ToString("F2") + "m) -> skip.");
                 return;
             }
+            // The Studio pair hotkey writes a womb's pair straight onto its materials, which ME does
+            // not persist - her body stamp does survive the save, so on load it is the only record of
+            // which pair the scene used. Match the womb to it BEFORE the pair is read below.
+            StudioPairWomb.LoadSync(cc, best);
             int st = best.OrganStencil();
             // overwriteExisting=false: on LOAD/reload, ensure the reveal exists but never re-stamp an
             // existing copy's stencil.

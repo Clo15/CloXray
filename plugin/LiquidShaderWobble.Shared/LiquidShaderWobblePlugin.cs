@@ -13,7 +13,7 @@ namespace LiquidWobbleMPB
     {
         public const string Guid = "Clo.LiquidWobbleMPB";
         public const string Name = "LiquidWobbleMPB";
-        public const string Version = "1.1.2";
+        public const string Version = "1.1.3";
 
         // The gated view of the log sink: null = silent, and every `_logger?.LogX(...)` in the plugin is a
         // no-op.
@@ -36,6 +36,8 @@ namespace LiquidWobbleMPB
         private static ConfigEntry<bool> _cfgDebugLog;
         private static ConfigEntry<bool> _cfgAutoBodyReveal;
         private static ConfigEntry<KeyboardShortcut> _cfgAutoBodyRevealKey;
+        private static ConfigEntry<KeyboardShortcut> _cfgStudioPairKey;
+        private static GUIStyle _osdStyle;   // built lazily inside OnGUI (GUI.skin is only valid there)
         private static ConfigEntry<bool> _cfgBodyVeil;
         private static ConfigEntry<bool> _cfgLimbMask;
         private static ConfigEntry<bool> _cfgClothesReveal;
@@ -189,6 +191,9 @@ namespace LiquidWobbleMPB
             _cfgAutoBodyRevealKey = Config.Bind(brSec, "Apply Now Hotkey", new KeyboardShortcut(KeyCode.X, KeyCode.LeftShift, KeyCode.LeftAlt),
                 "Manually (re)apply BodyReveal to every character near a CloXray womb. Use after first placing a womb, or after dragging one onto a different character. (Shift+Alt+X. Rebind here if it ever collides with another plugin.)");
 
+            _cfgStudioPairKey = Config.Bind(brSec, "Studio: womb + pair hotkey", new KeyboardShortcut(KeyCode.W, KeyCode.LeftControl, KeyCode.LeftShift),
+                "STUDIO only. Select a girl and press: if she has no womb one is added for her, parented to her and placed, then the whole x-ray is applied - no need to find the item and drop it in. Press again to move her to the next stencil pair, which is how a second or third girl in one scene gets her own (two girls sharing a pair see each other's organs). After the last pair it removes her x-ray and womb, and the next press starts over. (Ctrl+Shift+W.)");
+
             _cfgReactColliders = Config.Bind("WombExpand", "React to colliders", true,
                 "When NO BP penis is engaged, also react to the nearest DynamicBoneCollider (e.g. a BP collider you place and size with KKPE on a bottle/toy). The womb opens and displaces from the collider's deeper capsule end (treated as the tip) and its radius (girth), exactly like a penis. READ-ONLY: the collider itself is never modified. A real BP penis always takes priority.");
 
@@ -295,6 +300,21 @@ namespace LiquidWobbleMPB
 #if CLOXRAY_RESEARCH   // 1.1 release strip: research scaffolding compiles only in research builds (add CLOXRAY_RESEARCH to DefineConstants)
         private void OnGUI()
         {
+            // Studio pair hotkey: say which pair she just landed on, top-centre, for a few seconds.
+            // The pair is otherwise invisible - it lives in stencil values nobody can see.
+            string osd = StudioPairWomb.Osd;
+            if (osd != null)
+            {
+                // Cached on first use: GUIStyle needs GUI.skin, which only exists inside OnGUI, and
+                // allocating one per OnGUI call for the seconds the message is up is waste.
+                if (_osdStyle == null)
+                    _osdStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, fontSize = 16, fontStyle = FontStyle.Bold };
+                var r = new Rect(0f, 12f, Screen.width, 26f);
+                _osdStyle.normal.textColor = Color.black;
+                GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), osd, _osdStyle);   // drop shadow: readable on any scene
+                _osdStyle.normal.textColor = Color.white;
+                GUI.Label(r, osd, _osdStyle);
+            }
             if (!MainGameWomb.AutoCollectActive) return;
             int canalMM, poses, ready, minC, passNo;
             MainGameWomb.ResearchDot(out canalMM, out poses, out ready, out minC, out passNo);
@@ -403,6 +423,9 @@ namespace LiquidWobbleMPB
             {
                 if (CfgEnabled && _cfgAutoBodyRevealKey != null && ComboDown(_cfgAutoBodyRevealKey.Value))
                     AutoBodyReveal.ApplyAll();
+                if (CfgEnabled && _cfgStudioPairKey != null && ComboDown(_cfgStudioPairKey.Value))
+                    StudioPairWomb.Trigger();
+                StudioPairWomb.Tick();   // finishes an add once the new item's own component is up
             }
             else
             {

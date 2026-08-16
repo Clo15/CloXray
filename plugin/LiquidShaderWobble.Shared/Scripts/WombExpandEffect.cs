@@ -1890,7 +1890,7 @@ namespace LiquidWobbleMPB
                         Vector3 ld = -_smr.transform.InverseTransformDirection(lat);   // womb-local lean dir, sign-corrected
                         float lz = Mathf.Clamp(ld.z * 3f, -1f, 1f);
                         float lx = Mathf.Clamp(ld.x * 3f, -1f, 1f);
-                        const float sideScale = 0.5f;   // L/R lean = HALF of fwd/back (full-strength sideways lean read too strong)
+                        const float sideScale = 0.5f;   // L/R lean = HALF of fwd/back (tuned by eye — sideways lean was too strong)
                         fwd   = Mathf.Sqrt(Mathf.Max(0f,  lz)) * DirReactWeight;              back  = Mathf.Sqrt(Mathf.Max(0f, -lz)) * DirReactWeight;
                         right = Mathf.Sqrt(Mathf.Max(0f,  lx)) * DirReactWeight * sideScale;  left  = Mathf.Sqrt(Mathf.Max(0f, -lx)) * DirReactWeight * sideScale;
                     }

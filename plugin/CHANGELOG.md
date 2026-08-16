@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.3
+
+- **New Studio hotkey: `Ctrl+Shift+W` — one-key womb setup.** Select a girl and press: if she has
+  no womb, one is added, attached at her crotch and set up — no finding the item and placing it by
+  hand. Press again to move her to the next stencil pair; a second girl in the scene takes her own
+  pair automatically. After the last pair the x-ray comes off her again. The womb item is never
+  deleted by the hotkey. `Shift+Alt+X` is unchanged.
+- The studio items now show icons in the item list.
+- Womb item 7.4.3 — identical geometry; the embedded shader copies are refreshed in step with the
+  shader zipmod.
+
 ## 1.1.2
 
 - **The balls never draw through her body or clothes any more.** In the open they render normally

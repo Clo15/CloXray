@@ -2065,7 +2065,7 @@ namespace LiquidWobbleMPB
                     }
                     if (fAgents != null) break;
                 }
-                if (bpAsm != null) ForceBPSimplifyConfig(bpAsm);   // fix Simplify at BP's SOURCE (the cfg may have it Disabled)
+                if (bpAsm != null) ForceBPSimplifyConfig(bpAsm);   // fix Simplify at BP's SOURCE (user's cfg has it Disabled)
                 if (fAgents == null) { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: BetterPenetration not found (no 'collisionAgents') — the Free-H womb HARD-DEPENDS on BP. Install + enable BetterPenetration."); return; }
                 _sfAgents = fAgents; _sfDans = fDans; _sWomb = w; _sMale = male; _sFemale = female;
                 // lookup).

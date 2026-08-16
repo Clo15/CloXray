@@ -18,5 +18,6 @@
     <Compile Include="$(MSBuildThisFileDirectory)Scripts\WobbleSceneController.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Scripts\ShaderCarryOver.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Scripts\MainGameWomb.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Scripts\StudioPairWomb.cs" />
   </ItemGroup>
 </Project>
