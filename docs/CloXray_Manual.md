@@ -111,6 +111,29 @@ pick all this up on the first hotkey press.
 Stamped-window setups — a plane stamping `StencilRef 128` with organ items on `StencilBody 132/133`
 — need nothing set: stencil bit 7 is reserved for these windows, and her hands block them too.
 
+### One-key setup (Studio)
+
+Select a girl and press `Ctrl+Shift+W`. If she has no womb, one is added, attached at her crotch
+and set up for you — no finding the item and placing it by hand. Press again to move her to the
+next stencil pair; a second girl in the scene takes her own pair automatically (two girls sharing
+one would see each other's organs). After the last pair the x-ray comes off her again, and the next
+press starts over.
+
+
+**Starting from zero:**
+
+1. Add a female whose card uses a BP body uncensor.
+2. Add a male whose card uses a BP penis uncensor ("BP SOS" or similar) and turn his penis on
+   (Anim > State).
+3. Move him so the penis is close to her vagina.
+4. Select **her** and press `Ctrl+Shift+W`.
+
+A womb appears inside her, her body turns see-through over it, and his penis is x-rayed and aimed
+down her canal — push in and the canal opens around him, with the liquid and everything else live.
+
+The womb item itself is never deleted by the hotkey — delete it in the workspace when you want it
+gone. `Shift+Alt+X` is unchanged.
+
 ### Penis size bias (Free-H)
 
 With *Auto penis length* on, the fit aims the deepest push at the womb's cervix. The F1 slider
