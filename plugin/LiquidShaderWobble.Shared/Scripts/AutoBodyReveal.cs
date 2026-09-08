@@ -6,8 +6,20 @@ using UnityEngine;
 
 namespace LiquidWobbleMPB
 {
+    /// <summary>
     /// Auto-applies the CloXray "BodyReveal" stencil-writer to a character's body by DRIVING
-    /// MaterialEditor's API (reflection, no hard dependency.
+    /// MaterialEditor's API (reflection, no hard dependency - same style as <see cref="BPBridge"/>).
+    /// Replicates the manual workflow: body o_body_a / cf_m_body -> ME "Copy Material" (cf_m_body.MECopy)
+    /// -> shader "CloXray/BodyReveal" -> _StencilRef. MaterialEditor then PERSISTS + re-applies the copy
+    /// on its own reloads, so it only has to be (re)asserted when a fresh/swapped character appears.
+    ///
+    /// Trigger model is fully EVENT-DRIVEN (no per-frame poll):
+    ///   - KKAPI CharacterApi.CharacterReloaded -> re-apply to the reloaded character (the swap/load case).
+    ///   - A manual hotkey -> apply to every character that has a CloXray womb near its vagina
+    ///     (covers initial placement + the rare "drag an existing womb onto another character").
+    /// The stencil is read from the nearest womb's own organ material (_StencilBody), so the
+    /// body/organ pair stays matched. Per-body: only characters a womb resolves to are touched.
+    /// </summary>
     internal static class MEBridge
     {
         public const string BodyRevealShader = "CloXray/BodyReveal";
@@ -17,13 +29,56 @@ namespace LiquidWobbleMPB
         private const string BallsMat        = "cm_m_dan_f";          // the male balls material (o_dan_f)
         // Garment/accessory stamp copies render one step BEFORE the body copy (2500), because the
         // body's LimbBlock pass runs last and overwrites limb pixels with the reserved region 31 -
-        // a sleeve stamped afterwards would re-open the limb it is covering (b969). Before the limb
+        // a sleeve stamped afterwards would re-open the limb it is covering. Before the limb
         // feature existed these copies set no queue at all and inherited the shader's own 2500.
-        private const int GarmentStampQueue = 2499;
-        private const int   BodyVeilQueue    = 3504;   // after the WHOLE womb stack (organ 3500, interior 3502, cum 3503) — XrayAlpha = master fade
+        // TWO STACKS. The SHIPPED default is the legacy one, so a scene made before any of this opens
+        // exactly as it always did - including the CloXray shaders people applied to items of their own,
+        // which carry no queue record at all and simply follow the shader tag. The UPGRADED stack lives
+        // below Unity's 2500 opaque/transparent cutoff, where a draw still gets the screen-space shadow
+        // buffer; that is what stops the in-window penis rendering flat. You opt in per character by
+        // pressing the one-key hotkey, which writes the upgraded numbers through Material Editor so they
+        // persist with the scene.
+        // The one-key hotkey opts a STUDIO character in. The main game is not opt-in - it is always on
+        // the sub-2500 stack, because the opt-in only exists to protect Studio scenes that persist
+        // render queues through Material Editor, and Free-H has no scene file carrying them.
+        //
+        // That invariant used to live in the call sites, and one of them did not have it: the Free-H
+        // re-apply after a body reload (ReapplyMainGameBodyXray) left the flag false, so every queue it
+        // wrote came out LEGACY. The garment cut went back to 2499 while her body stamp stayed at 2479
+        // and the womb at 2482 - a stamp drawn AFTER the organ it is supposed to open, so the clothes
+        // stopped being see-through about a tenth of a second after each hotkey press while the womb
+        // itself stayed correct. Free-H is now upgraded by CONSTRUCTION, not by remembering.
+        private static bool _upgradeStack;
+        internal static bool UpgradeStack
+        {
+            get { return _upgradeStack || !MainGameWomb.IsStudio; }
+            set { _upgradeStack = value; }
+        }
+        private static int Q(int legacy, int upgraded) { return UpgradeStack ? upgraded : legacy; }
+        // True for a value belonging to EITHER stack - an assertion must accept both, or re-applying to
+        // an upgraded scene (a plain load, no hotkey) would drag it back to legacy.
+        private static bool QueueOk(int q, int legacy, int upgraded) { return q == legacy || q == upgraded; }
+
+        private const int GarmentStampQueue         = 2499;
+        private const int GarmentStampQueueUp       = 2478;
+        // Garment GHOST layer: a second per-garment copy on CloXray/BodyRevealExtra (the same shader
+        // the skin veil uses) that redraws the fabric translucently over the x-ray window - so a
+        // shirt over the belly ghosts at the XrayAlpha strength instead of being cut through
+        // completely. One past the skin veil (3504): fabric is outermost, ties are sorting luck.
+        private const int GarmentVeilQueue          = 3505;
+        private const int GarmentVeilQueueUp        = 2487;
+        private const int   BodyStampQueue   = 2500;   // the body stencil stamp: MUST precede every organ layer
+        private const int   BodyStampQueueUp = 2479;
+        private const int   BodyVeilQueue    = 3504;   // after the WHOLE womb stack - XrayAlpha = master fade
+        private const int   BodyVeilQueueUp  = 2486;
         // The "original look" penis copy sits here, keeping the character's OWN shader. Class-level
-        // because APPLY (adopt) and REMOVE must agree on the identity — they did not, and the copy leaked.
-        private const int   OriginalRedrawQueue = 3502;
+        // because APPLY (adopt) and REMOVE must agree on the identity - they did not, and the copy leaked.
+        private const int   BallsOccluderQueue    = 2501;
+        private const int   BallsOccluderQueueUp  = 2480;
+        private const int   PenisCarveQueue       = 3501;   // = the OrgInside tag; a COPY inherits it with no record
+        private const int   PenisCarveQueueUp     = 2483;
+        private const int   OriginalRedrawQueue   = 3502;
+        private const int   OriginalRedrawQueueUp = 2484;
 
         private static bool _tried;
         private static Type _ctrlType;            // KK_Plugins.MaterialEditor.MaterialEditorCharaController
@@ -95,7 +150,7 @@ namespace LiquidWobbleMPB
             {
                 _objType = _ctrlType.GetNestedType("ObjectType");
                 _otCharacter = Enum.Parse(_objType, "Character");
-                // Clothing/Accessory member names vary in capitalization across ME builds.
+                // Clothing/Accessory member names vary in capitalization across ME builds - resolve by scan.
                 foreach (var n in Enum.GetNames(_objType))
                 {
                     string ln = n.ToLowerInvariant();
@@ -108,7 +163,8 @@ namespace LiquidWobbleMPB
                     new[] { typeof(int), _objType, typeof(Material), typeof(string), typeof(GameObject), typeof(bool) });
                 _mSetFloat = _ctrlType.GetMethod("SetMaterialFloatProperty",
                     new[] { typeof(int), _objType, typeof(Material), typeof(string), typeof(float), typeof(GameObject), typeof(bool) });
-                // Queue setter (for the veil copy, which must land at 3502).
+                // Queue setter (for the veil copy, which must land after the organ). Signature varies across
+                // ME versions - bind by name and fill args by parameter type at call time.
                 try { _mSetQueue = _ctrlType.GetMethod("SetMaterialShaderRenderQueue");
                 _mRemoveShader      = _ctrlType.GetMethod("RemoveMaterialShader", new Type[] { typeof(int), _objType, typeof(Material), typeof(GameObject), typeof(bool) });
                 _mRemoveShaderQueue = _ctrlType.GetMethod("RemoveMaterialShaderRenderQueue", new Type[] { typeof(int), _objType, typeof(Material), typeof(GameObject), typeof(bool) }); } catch { _mSetQueue = null; }
@@ -146,8 +202,21 @@ namespace LiquidWobbleMPB
             return null;
         }
 
-        // The existing-check for the reveal/veil stamps: the shader counts as applied only when it sits on a
-        // .MECopy.
+        // The existing-check for the reveal/veil stamps: the CloXray shader counts as applied ONLY when it sits
+        // on a .MECopy. A CloXray shader that ended up on the ORIGINAL body material (a corrupted save)
+        // must read as NOT-applied so the stamp path can repair and recreate instead of no-opping.
+        // Her body STAMP copy, or null. Its render queue is the marker for which stack she is on -
+        // read by SyncWombStack, which has no business reaching into MEBridge's internals for it.
+        internal static Material FindBodyStamp(Component cc)
+        {
+            var bodyR = FindBodyRenderer(cc);
+            return bodyR != null ? FindConfiguredCopy(bodyR, BodyRevealShader) : null;
+        }
+        internal static bool StampIsUpgraded(Material stamp)
+        {
+            return stamp != null && stamp.renderQueue == BodyStampQueueUp;
+        }
+
         private static Material FindConfiguredCopy(SkinnedMeshRenderer r, string shaderName)
         {
             foreach (var m in r.sharedMaterials)
@@ -155,8 +224,12 @@ namespace LiquidWobbleMPB
             return null;
         }
 
-        // MaterialEditor records every copy it creates in its MaterialCopyList as (MaterialName ->
-        // MaterialCopyName).
+        // MaterialEditor records every copy it creates in its MaterialCopyList as
+        // (MaterialName -> MaterialCopyName). Asking that list which copy just appeared is exact, where
+        // comparing the renderer's material array before and after is not: ME's copy call reassigns the
+        // whole array, so every entry comes back as a fresh instance with a " (Instance)" suffix. That is
+        // what once resolved "the new copy" to the ORIGINAL body material and persisted a stencil-writer
+        // shader onto it - an invisible body - and what left unconfigured copies behind on a name miss.
         private static System.Collections.IList CopyRows(object me)
         {
             if (_fCopyList == null) _fCopyList = _ctrlType.GetField("MaterialCopyList", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
@@ -177,6 +250,7 @@ namespace LiquidWobbleMPB
         }
 
         // Creates a copy of srcBody through ME (so it is persisted) and returns exactly that copy.
+        // Null on any failure, always with a reason logged - nothing is guessed.
         private static Material CreateCopyTracked(object me, SkinnedMeshRenderer bodyR, Material srcBody, GameObject go, string what)
         {
             string src = BaseName(srcBody);
@@ -209,7 +283,9 @@ namespace LiquidWobbleMPB
         }
 
         // Corrupted-save repair: the ORIGINAL body material carrying a CloXray shader draws no skin
-        // (stencil-writer passes write no color).
+        // (stencil-writer passes write no color) - the invisible-body state. ME's RemoveMaterialShader
+        // restores the shader it recorded as original and deletes the persisted edit, so the fix also
+        // sticks in the next save.
         private static void RepairOriginalBodyMaterial(object me, SkinnedMeshRenderer r, GameObject go, Component cc)
         {
             foreach (var m in r.sharedMaterials)
@@ -222,8 +298,8 @@ namespace LiquidWobbleMPB
                 {
                     _mRemoveShader.Invoke(me, new object[] { 0, _otCharacter, m, go, true });
                     if (_mRemoveShaderQueue != null) _mRemoveShaderQueue.Invoke(me, new object[] { 0, _otCharacter, m, go, true });
-                    // ME's remove only clears rows under the current coordinate index; the poison was
-                    // written per coordinate index; sweeping every index covers any layout MaterialEditor used.
+                    // ME's remove only clears rows under the current coordinate index; the poison was written per
+                    // coordinate index; sweeping every index covers any layout MaterialEditor used.
                     int purged = PurgePersistedCloRows(me, BaseName(m));
                     if (purged > 0) LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: purged " + purged + " persisted CloXray row(s) for '" + BaseName(m) + "' across all outfits.");
                 }
@@ -243,7 +319,9 @@ namespace LiquidWobbleMPB
         }
 
         // Deletes persisted ME rows that put a CloXray shader (or a CloXray-range queue) on the named
-        // NON-copy material, on every outfit coordinate.
+        // NON-copy material, on EVERY outfit coordinate. Only ever called for an ORIGINAL body material
+        // that was found carrying a CloXray shader - copies are never touched (their MaterialName contains
+        // ".MECopy" and never equals the original's name).
         private static int PurgePersistedCloRows(object me, string matName)
         {
             int purged = 0;
@@ -262,7 +340,17 @@ namespace LiquidWobbleMPB
                         object rq = GetMember(row, "RenderQueue");
                         if (sn != null && sn.StartsWith("CloXray/")) poison = true;
                         else if (string.IsNullOrEmpty(sn) && rq != null)
-                        { try { int q = Convert.ToInt32(rq); if (q >= 3490 && q <= 3505) poison = true; } catch { } }
+                        {
+                            // A record with NO shader name but one of the CloXray queues is the penis redraw copy -
+                            // it keeps its own shader, so the queue is the only thing that marks it.
+                            // BOTH stacks: the legacy band and the sub-2500 one the hotkey writes.
+                            try
+                            {
+                                int q = Convert.ToInt32(rq);
+                                if ((q >= 3490 && q <= 3505) || (q >= 2478 && q <= 2488)) poison = true;
+                            }
+                            catch { }
+                        }
                     }
                     else
                     {
@@ -275,6 +363,7 @@ namespace LiquidWobbleMPB
             return purged;
         }
 
+        // One-block state dump of the body renderer, for diagnosing material corruption from the log.
         public static void DumpBodyState(Component cc, string tag)
         {
             try
@@ -322,21 +411,21 @@ namespace LiquidWobbleMPB
         // other's slot when both exist on the body.
 
 
-        // ---- MASK / QUEUE STATE (b909) ----------------------------------------------------------
+        // ---- MASK / QUEUE STATE ----------------------------------------------------------
         // Two questions in one dump, because both are answered by the same per-material state and the
         // repro run is expensive:
         //
-        // (1) VANISHING BODYPARTS. Every CloXray shader is ColorMask 0 - we never paint a pixel - so we
-        // cannot repaint a garment or a body. Geometry can therefore only go missing three ways:
-        // the render array (see AuditGeometry), DEPTH we write, or the GAME's own clothes alpha mask
-        // that hides the body under a garment so it cannot clip through. The third is not ours to
-        // write, but it IS ours to disturb: an ME material copy carries whatever mask texture was
-        // bound at copy time, and a body rebuild re-composites it. So print the mask textures and
-        // the queue, per material, and the answer stops being a guess.
+        // (1) VANISHING BODYPARTS. Every CloXray shader is ColorMask 0 - never paints a pixel - so the
+        //     cannot repaint a garment or a body. Geometry can therefore only go missing three ways:
+        //     the render array (see AuditGeometry), DEPTH written, or the GAME's own clothes alpha mask
+        //     that hides the body under a garment so it cannot clip through. The third is not ours to
+        //     write, but it IS ours to disturb: an ME material copy carries whatever mask texture was
+        //     bound at copy time, and a body rebuild re-composites it. So print the mask textures and
+        //     the queue, per material, and the answer stops being a guess.
         //
         // (2) THE HAND/TORSO REGION MASK. It only works if the copy actually carries _RegionMask with a
-        // non-zero cutoff; a null texture or cutoff 0 means masking is silently OFF (by design, so
-        // old scenes keep working) and hands still x-ray through. Printing both proves which.
+        //     non-zero cutoff; a null texture or cutoff 0 means masking is silently OFF (by design, so
+        //     old scenes keep working) and hands still x-ray through. Printing both proves which.
         static readonly string[] MaskTexProps = {
             "_AlphaMask", "_alpha_a", "_AlphaMask2", "_ClothesMask", "_MaskTex", "_liquidmask",
             "_MainTex", "_overtex1", "_Texture2", "_RegionMask"
@@ -365,8 +454,8 @@ namespace LiquidWobbleMPB
                         if (m == null) { sb.Append("\n").Append("    (null)"); continue; }
                         sb.Append("\n").Append("    '").Append(m.name).Append("' q=").Append(m.renderQueue)
                           .Append(" sh=").Append(m.shader != null ? m.shader.name : "NULL");
-                        // SHADER FINGERPRINT (b919). A copy dumped sh=CloXray/BodyReveal with NONE of
-                        // the b898+ properties, while the only zipmod on disk (and the only manifest
+                        // SHADER FINGERPRINT. A copy dumped sh=CloXray/BodyReveal with NONE of
+                        // the newer properties, while the only zipmod on disk (and the only manifest
                         // among 7416 that declares CloXray at all) verifiably carries them - so two
                         // Shader objects with the same name must be alive. Print the instance id and a
                         // property fingerprint so the log says which object each material is bound to.
@@ -388,15 +477,15 @@ namespace LiquidWobbleMPB
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: mask dump failed: " + e.Message); }
         }
 
-        // ---- GEOMETRY AUDIT (b908) --------------------------------------------------------------
+        // ---- GEOMETRY AUDIT --------------------------------------------------------------
         // "The character loses bodyparts" is a RENDER-ARRAY fault, not a shader one, and Unity gives it
-        // exactly three causes. Nothing in the existing dumps tested any of them, so every log we have
+        // exactly three causes. Nothing in the existing dumps tested any of them, so every log so far
         // read was blind to the actual failure:
-        // 1. sharedMaterials.Length < subMeshCount -> the trailing submeshes are NEVER DRAWN. This is
-        // the one our own code can cause: MaterialCopyRemove is a TOGGLE, and handing it the wrong
-        // material removes a slot instead of adding one. Losing a slot silently deletes geometry.
-        // 2. a null entry in sharedMaterials -> that submesh is not drawn.
-        // 3. renderer disabled / object inactive.
+        //   1. sharedMaterials.Length < subMeshCount -> the trailing submeshes are NEVER DRAWN. This is
+        //      the one this code can cause: MaterialCopyRemove is a TOGGLE, and handing it the wrong
+        //      material removes a slot instead of adding one. Losing a slot silently deletes geometry.
+        //   2. a null entry in sharedMaterials -> that submesh is not drawn.
+        //   3. renderer disabled / object inactive.
         // Anomalies only, so the log stays readable on a healthy character; the summary line proves the
         // audit ran even when it finds nothing (a silent audit is indistinguishable from a skipped one).
         public static void AuditGeometry(Component cc, string when)
@@ -425,7 +514,7 @@ namespace LiquidWobbleMPB
                     int nulls = 0;
                     for (int i = 0; i < mats.Length; i++) if (mats[i] == null) nulls++;
 
-                    // Cause 4 (b937): a CloXray copy PAIRED with a submesh. Our stamps are ColorMask 0
+                    // Cause 4: a CloXray copy PAIRED with a submesh. These stamps are ColorMask 0
                     // - invisible by design - so if ME's array rebuild ever leaves one at an index
                     // below subMeshCount, that submesh renders ONLY the invisible stamp and the
                     // garment part visually disappears while the material COUNT stays healthy. The
@@ -502,8 +591,9 @@ namespace LiquidWobbleMPB
                 return 0;
             }
             int removed = 0;
-            // CLOTHES first. ME addresses a garment by its slot index + the Clothing object type; giving it
-            // the Character type (as the body/penis pass does) makes it look in the wrong list and drop nothing.
+            // CLOTHES FIRST. ME addresses a garment by its slot index + the Clothing object type; giving
+            // it the Character type (as the body/penis pass does) makes it look in the wrong list and
+            // drop nothing. Doing these first also leaves only body/penis copies for the pass below.
             if (_otClothing != null)
             {
                 GameObject[] slots = null;
@@ -523,7 +613,7 @@ namespace LiquidWobbleMPB
                             removed += RemoveCopiesOn(me, r, kind, _otClothing, slots[kind], cc.name);
                     }
             }
-            // ACCESSORIES NEXT - the missing half of EnsureAccessoryReveal, found via the b908 geometry
+            // ACCESSORIES NEXT - the missing half of EnsureAccessoryReveal, found via the geometry
             // audit + copy-row errors in a live log. Accessory garments are stamped with the Accessory
             // object type and their SLOT index; without this pass their copies fell through to the
             // character-wide sweep below, which hands ME the Character type - the wrong list - so ME
@@ -559,12 +649,12 @@ namespace LiquidWobbleMPB
                 LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: removed " + removed + " x-ray copy/copies from '" + cc.name + "'.");
                 // DELIBERATELY NOT ForgetPenisLook(). The snapshot is already per-male and
                 // first-write-wins (see CapturePenisLook), so it self-invalidates when the male changes.
-                // Dropping it on every removal meant a toggle OFF then ON re-captured — and a reporter's
+                // Dropping it on every removal meant a toggle OFF then ON re-captured - and a reporter's
                 // sequence is exactly "change pose, x-ray off, x-ray on", by which point KPlug may have
-                // already rewritten the materials. We would then snapshot the BROKEN state and restore it
-                // faithfully from then on, which is why the fault looked random: it is a race between our
+                // already rewritten the materials. That would snapshot the BROKEN state and restore it
+                // faithfully from then on, which is why the fault looked random: it is a race between this
                 // re-capture and KPlug's rewrite. Keeping the first good capture removes the race.
-                // With our copies gone the renderer is back to what KPlug/the uncensor own. Dumping here
+                // With the CloXray copies gone the renderer is back to what KPlug/the uncensor own. Dumping here
                 // is the only way to see that state - every other dump fires while a womb exists.
                 if (AutoBodyReveal.Debug && cc != null) DumpXrayChain(cc, null, null);
             AuditGeometry(cc, "AFTER REMOVE");
@@ -572,7 +662,8 @@ namespace LiquidWobbleMPB
             return removed;
         }
 
-        // Hand ME the COPY itself: MaterialCopyRemove branches on the name it is given.
+        // Hand ME the COPY itself: MaterialCopyRemove branches on the name it is given - a ".MECopy"
+        // removes, an ORIGINAL creates another copy. Snapshot first: removing rewrites sharedMaterials.
         private static int RemoveCopiesOn(object me, Renderer r, int slot, object objType, GameObject go, string who)
         {
             if (r == null || r.sharedMaterials == null || go == null) return 0;
@@ -584,7 +675,7 @@ namespace LiquidWobbleMPB
                 // THE ORIGINAL-LOOK COPY. It carries the character's OWN shader by design - that is the
                 // whole point of it, re-drawing the penis through the window with his real shading - so a
                 // "shader starts with CloXray/" test can never see it, and it survived every removal. It
-                // then leaks: the male keeps a second draw of his penis at 3502 after the womb is gone,
+                // then leaks: the male keeps a second draw of his penis at the redraw queue after the womb is gone,
                 // and the next apply allocates a fresh index (MECopy1 -> MECopy3) so the layout no longer
                 // matches a clean apply. Two draws of a reflective skin shader over one mesh read as a
                 // blown-out white penis, which is the reported symptom.
@@ -593,7 +684,7 @@ namespace LiquidWobbleMPB
                 // a .MECopy on the penis material at exactly the redraw queue. Symmetric by construction -
                 // if apply would adopt it, removal must drop it.
                 // Compare against the SOURCE name, not the copy's. BaseName gives "cm_m_dankon.MECopy2"
-                // and IsPenisMat demands exact equality with "cm_m_dankon", so the b885 version of this
+                // and IsPenisMat demands exact equality with "cm_m_dankon", so an earlier form of this
                 // test could never be true and the copy went on leaking - visible in a reporter's log as
                 // MECopy2 surviving every removal while the carve came back as MECopy3.
                 string bn = BaseName(m);
@@ -633,7 +724,13 @@ namespace LiquidWobbleMPB
             return null;
         }
 
-        /// Idempotently ensure the body has a BodyReveal copy at the given stencil.
+        /// <summary>
+        /// Idempotently ensure the body has a BodyReveal copy at the given stencil. cc = the ChaControl
+        /// (treated as a UnityEngine.Component). Logs loudly; no-ops if ME is absent.
+        /// </summary>
+        // True once this body's BodyReveal MECopy is present - i.e. MaterialEditor has restored (or the hotkey
+        // created) it. The deferred on-load coroutine polls this: once true the saved copy is ADOPTED (never
+        // re-stamped); if it never becomes true within the cap, the character is genuinely fresh -> create.
         public static bool MERestoredFor(Component cc)
         {
             if (cc == null) return false;
@@ -641,11 +738,48 @@ namespace LiquidWobbleMPB
             catch { return false; }
         }
 
+        // KKUTS_Tess-family shaders tessellate and DISPLACE the surface in front of the flat stamp
+        // copy, so the stamp's LEqual depth test fails up close and the reveal window never opens
+        // (visible only zoomed out, where the distance-adaptive tessellation collapses back to the
+        // base mesh - GitHub issue #3). A camera-ward pull of a few mm on the stamp restores it
+        // while keeping depth occlusion by props and hands. Applied ONLY when the SOURCE material's
+        // shader is a tess variant; the shader default is 0, so every other install keeps the exact
+        // legacy stamp.
+        private const float TessStampPull = 0.010f;   // metres - covers Phong + heightmap displacement
+        private static bool IsTessShader(Material m)
+        {
+            return m != null && m.shader != null
+                && m.shader.name.IndexOf("tess", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        // Sets _StampPull on a stamp copy to match its SOURCE material. Loud when the installed
+        // shader zipmod predates the property - silently skipping would reproduce the exact
+        // invisible-window this exists to fix.
+        private static void ApplyStampPull(object me, int slot, object objType, Material stampCopy, Material source, GameObject go, string who)
+        {
+            if (stampCopy == null) return;
+            float want = IsTessShader(source) ? TessStampPull : 0f;
+            if (!stampCopy.HasProperty("_StampPull"))
+            {
+                if (want > 0f)
+                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: '" + who + "' uses a tess shader ('" + source.shader.name
+                        + "') but the installed CloXray/BodyReveal has no _StampPull - update [Clo]XrayShaders.zipmod; the x-ray window will keep failing up close until then.");
+                return;
+            }
+            if (Mathf.Approximately(stampCopy.GetFloat("_StampPull"), want)) return;
+            _mSetFloat.Invoke(me, new object[] { slot, objType, stampCopy, "StampPull", want, go, true });
+            if (want > 0f)
+                LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: '" + who + "' uses tess shader '" + source.shader.name
+                    + "' - " + (TessStampPull * 1000f).ToString("F0") + "mm stamp pull applied so the window survives the displaced skin.");
+        }
+
         public static bool EnsureBodyReveal(Component cc, int stencil, bool debug, bool overwriteExisting)
         {
             Init();
             if (cc == null) return false;
-            // The reveal/veil/clothes stamps dress the womb's WEARER.
+            // The reveal/veil/clothes stamps dress the womb's WEARER. A male near the womb must never
+            // receive them: his body material (cm_m_body) was copied by the source-pick fallback
+            // and then missed by the old cf_m_body-only copy finder, leaking an orphan .MECopy into the
+            // scene on every pass (reported: cm_m_body.MECopy12..16 after a few sessions).
             if (MainGameWomb.IsMaleChara(cc)) { if (debug) LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: '" + cc.name + "' is male - the body reveal stamp only applies to the wearer."); return false; }
             if (_ctrlType == null) { if (debug) LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: ME unavailable; cannot auto-apply BodyReveal."); return false; }
 
@@ -658,11 +792,15 @@ namespace LiquidWobbleMPB
                 var bodyR = FindBodyRenderer(cc);
                 if (bodyR == null) { if (debug) LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: body renderer (o_body*) not found on '" + cc.name + "'."); return false; }
 
-                // GameObject ME expects for body edits = ChaControl.objBody (field OR property, varies by
-                // game build); fall back to the renderer's GO (ME accepts it).
+                // GameObject ME expects for body edits = ChaControl.objBody (field OR property,
+                // varies by game build); fall back to the renderer's GO (ME accepts it).
                 GameObject go = GetBodyGo(cc) ?? bodyR.gameObject;
 
-                // Already applied? On the HOTKEY (overwriteExisting) keep the stencil synced to the womb.
+                // Already applied? On the HOTKEY (overwriteExisting) keep the stencil synced to the womb. On the
+                // on-LOAD re-apply (overwriteExisting=false) LEAVE it: the saved copy is authoritative, and the womb's
+                // _StencilBody may not be MaterialEditor-restored yet - reading it early on a non-default pair would
+                // stamp the stale default 4 over a saved 8 (the load-reset bug). Mirrors how the veil already
+                // protects its XrayAlpha slider from a re-press.
                 RepairOriginalBodyMaterial(me, bodyR, go, cc);
                 var existing = FindConfiguredCopy(bodyR, BodyRevealShader);
                 if (existing != null)
@@ -675,29 +813,41 @@ namespace LiquidWobbleMPB
                     else if (debug) LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: '" + cc.name + "' already has BodyReveal (stencil " + stencil + "). No-op.");
                     // The torso mask shipped AFTER many copies were created and persisted, and this
                     // branch used to return without ever touching it - so an adopted pre-mask copy kept
-                    // stamping her hands forever ("bare hands don't block the womb" in live testing).
-                    // The mask is OURS, not a user edit: assert it whenever it is absent.
+                    // stamping her hands forever - bare hands must not block the womb, confirmed by live test.
+                    // The mask belongs to CloXray, not to a hand edit: assert it whenever it is absent.
                     QueueRegionMask(me, existing, go, cc.name, debug);
-                    // F1 master (b936): Free-H has no ME, so the cutoff follows the toggle. 0 = mask
+                    // Same reasoning as the mask, and as the veil's own queue check: the stamp copy is
+                    // OURS. A scene saved before the stack moved below 2500 pins its queue at the old
+                    // 2500, which would draw the body stencil AFTER the organs that test it - the window
+                    // simply would not open. Assert it; a queue the USER set on a material of their own
+                    // is never touched by this.
+                    EnsureStampQueue(me, existing, go, cc.name);
+                    // F1 master: Free-H has no ME, so the cutoff follows the toggle. 0 = mask
                     // off = the womb shows through hands/limbs; 0.5 = the shipped default behavior.
                     _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, existing, "RegionMaskCutoff", LiquidWobbleMPBPlugin.CfgLimbMask ? 0.5f : 0f, go, true });
-                    // b930: the BODY stamp must not respect the limb block (gate 0) - plain depth
+                    // the BODY stamp must not respect the limb block (gate 0) - plain depth
                     // already stops it behind a limb, and gating it only fattened the margins by the
                     // inflate distance. Garment copies keep the shader default (128).
+                    ApplyStampPull(me, 0, _otCharacter, existing,
+                        FindByName(bodyR, "cf_m_body") ?? (bodyR.sharedMaterials.Length > 0 ? bodyR.sharedMaterials[0] : null), go, cc.name);
                     return true;
                 }
 
                 // Find or create the copy slot (MaterialCopyRemove is a toggle -> only call it to CREATE).
+                // The copy is matched by the SOURCE material's real name - a custom body may not call it
+                // cf_m_body, and a name mismatch here is what orphaned copies instead of configuring them.
                 var srcBody = FindByName(bodyR, "cf_m_body") ?? (bodyR.sharedMaterials.Length > 0 ? bodyR.sharedMaterials[0] : null);
                 if (srcBody == null) { if (debug) LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: no body material on '" + cc.name + "'."); return false; }
                 var copy = FindCopy(bodyR, BaseName(srcBody)) ?? CreateCopyTracked(me, bodyR, srcBody, go, "body reveal");
                 if (copy == null) return false;
 
                 _mSetShader.Invoke(me, new object[] { 0, _otCharacter, copy, BodyRevealShader, go, true });
-                DirectSetShader(copy, go, BodyRevealShader);   // b940: the flip happens NOW; the ME call above is persistence only
+                DirectSetShader(copy, go, BodyRevealShader);   // the flip happens NOW; the ME call above is persistence only
                 _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "StencilRef", (float)stencil, go, true });
                 QueueRegionMask(me, copy, go, cc.name, debug);
                 _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "RegionMaskCutoff", LiquidWobbleMPBPlugin.CfgLimbMask ? 0.5f : 0f, go, true });   // F1 master, see the adopted path
+                EnsureStampQueue(me, copy, go, cc.name);
+                ApplyStampPull(me, 0, _otCharacter, copy, srcBody, go, cc.name);
                 LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: applied BodyReveal to '" + cc.name + "' (copy='" + copy.name + "', shader='" + (copy.shader ? copy.shader.name : "?") + "', stencil=" + stencil + ").");
                 return true;
             }
@@ -714,35 +864,30 @@ namespace LiquidWobbleMPB
         /// shader IN PLACE via ME (persists with the scene/card); idempotent. No-ops if ME is absent or the
         /// selected character has no cm_m_dankon (not a male / no penis mesh).
         /// </summary>
-        // ---- DAN_F SPLIT (b935) -----------------------------------------------------------------
+        // ---- DAN_F SPLIT -----------------------------------------------------------------
         // o_dan_f is ONE mesh with two roles, split by its own bones (cm_J_dan_f_top = the covering
         // skin at the shaft junction; cm_J_dan_f_L/_R = the sack lobes) and baked offline into two
         // UV masks (tools/make_danf_mask.py, shipped beside the DLL):
-        // OCCLUDER (b934 stamp, kept): masked to the SACK - the lobes block the x-ray window like
-        // a hand wherever they are frontmost, and never draw through anything;
-        // CONTENT (new): a carve+redraw pair like the shaft's, masked to the TOP skin - so the
-        // junction region renders in-window with the penis, which removes the white blob that
-        // every removal of dan_f content has re-exposed since b920 (it was dan_f's own zone,
-        // bare, under the veil).
-        // ---- (b934 note: OCCLUDER value; b933's organ value was wrong) --------------------------
+        //   OCCLUDER (stamp, kept): masked to the SACK - the lobes block the x-ray window like
+        //     a hand wherever they are frontmost, and never draw through anything;
+        //   CONTENT (new): a carve+redraw pair like the shaft's, masked to the TOP skin - so the
+        //     junction region renders in-window with the penis, which removes the white blob that
+        //     every removal of dan_f content has re-exposed (it was dan_f's own zone,
+        //     bare, under the veil).
+        // ---- (OCCLUDER value; the organ value was incorrect) ------------------------------------
         // The balls (cm_m_dan_f) stamp an INERT region value (2) that NO pass consumes - not the
-        // shaft's window punch (4), not the organ pipeline (5), not the veil (>=5). b933 used the
+        // shaft's window punch (4), not the organ pipeline (5), not the veil (>=5). An earlier value used the
         // organ value on the theory that only the WOMB chain would accept it; on screen the PENIS
         // carve's own DepthClear keys on the same 5, so the shaft punched through the balls even in
-        // open air (screenshots from behind). With 2 the balls become a pure OCCLUDER of
+        // open air (screenshots, view from behind). With 2 the balls become a pure OCCLUDER of
         // the x-ray window, like a bare hand:
-        // - in AIR: nothing consumes 2, the redraw fails against the balls' own depth -> plain;
-        // - at the penetration overlap: no window on balls-front pixels -> the real balls show,
-        // and the white is impossible (white always required a contentless WINDOW pixel);
-        // - behind her body/clothes: the stamp loses the depth test to whatever is in front, so
-        // her stamps rule and the balls never draw on top of anything.
+        //   - in AIR: nothing consumes 2, the redraw fails against the balls' own depth -> plain;
+        //   - at the penetration overlap: no window on balls-front pixels -> the real balls show,
+        //     and the white is impossible (white always required a contentless WINDOW pixel);
+        //   - behind her body/clothes: the stamp loses the depth test to whatever is in front, so
+        //     her stamps rule and the balls never draw on top of anything.
         // No planes, no feeds, no state gating.
         private const float BallsOccluderRef = 2f;   // low-5 region value consumed by no pass (0=outside, 4=body, 5=organ)
-
-        private static string MaskPath(string file)
-        {
-            return System.IO.Path.Combine(System.IO.Path.GetDirectoryName(typeof(MEBridge).Assembly.Location), file);
-        }
 
         internal static bool EnsureBallsStamp(Component cc, int stencil, bool debug)
         {
@@ -782,20 +927,24 @@ namespace LiquidWobbleMPB
                     return CreateCopyTracked(me, ballsR, src, go, role);
                 };
 
-                // Occluder-ONLY by design: any in-window dan_f content draws THROUGH clothes and
-                // body whenever the window overlaps the balls on screen (the window IS what you see
-                // there) - every past balls leak was the old carve or redraw doing exactly that.
-                // The whole mesh blocks the window like a hand; cutoff 0 turns the region mask off,
-                // so a body rebuild has nothing texture-shaped to lose.
+                // dan_f is OCCLUDER-ONLY. The carve and redraw existed to paint the "covering
+                // skin" band in-window like the penis - but any in-window dan_f content draws THROUGH
+                // clothes/body whenever the window overlaps the balls on screen (the window IS what
+                // you see there). Every leak variant of the saga (white, tinted, real-look) was one
+                // of those two painters under different conditions; the "confirmed good" scene
+                // simply never overlapped window and balls. So: no in-window content, ever. The whole
+                // mesh blocks the window like a hand (cutoff 0 disables the region mask entirely -
+                // nothing texture-shaped left for ME replay to lose), and the base material owns
+                // every pixel the balls legitimately show.
                 if (occ == null) occ = take("dan_f occluder");
                 if (occ != null)
                 {
                     _mSetShader.Invoke(me, new object[] { 0, _otCharacter, occ, BodyRevealShader, go, true });
-                    DirectSetShader(occ, go, BodyRevealShader);   // b940: the flip happens NOW; the ME call above is persistence only
+                    DirectSetShader(occ, go, BodyRevealShader);   // the flip happens NOW; the ME call above is persistence only
                     _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, occ, "StencilRef", BallsOccluderRef, go, true });
                     _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, occ, "StampZWrite", 0f, go, true });
-                    _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, occ, "RegionMaskCutoff", 0f, go, true });   // b944: whole mesh occludes (shader default is 0.5!)
-                    SetQueuePersisted(me, 0, _otCharacter, occ, go, 2501);
+                    _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, occ, "RegionMaskCutoff", 0f, go, true });   // whole mesh occludes (shader default is 0.5!)
+                    SetQueuePersisted(me, 0, _otCharacter, occ, go, Q(BallsOccluderQueue, BallsOccluderQueueUp));
                 }
 
                 // Both in-window painters are handed back to ME on sight - old scenes self-heal.
@@ -855,7 +1004,41 @@ namespace LiquidWobbleMPB
                 GameObject go = GetBodyGo(cc) ?? penisR.gameObject;
                 bool already = dankon.shader != null && dankon.shader.name == OrgInsideShader;
 
-                // ORIGINAL material.
+                // LEGACY UPGRADE. Early builds converted the MAIN penis material in place;
+                // scenes saved then still replay that record, so the penis arrives with ONE OrgInside
+                // material instead of carve + original-look redraw, and the outside-body half is painted
+                // by OrgInside itself (which is what leaked background through its out-of-body clears).
+                // Only the one-key hotkey does this: pressing it means "set this up properly", while
+                // every other caller leaves a deliberate in-place conversion alone. ME recorded the
+                // original shader as ShaderNameOriginal, so RemoveMaterialShader hands it straight
+                // back - nothing is guessed. NO FALLBACK: if the ME method is missing, say so and
+                // keep the old layout rather than half-upgrading.
+                if (already && AutoBodyReveal.PenisTakeover)
+                {
+                    if (_mRemoveShader == null || _mRemoveShaderQueue == null)
+                        LiquidWobbleMPBPlugin._logger?.LogError("MEBridge: '" + cc.name + "' has the OLD in-place penis conversion and this ME has no RemoveMaterialShader - leaving it as one material. Fix the ME bridge to upgrade old scenes.");
+                    else
+                    {
+                        _mRemoveShaderQueue.Invoke(me, new object[] { 0, _otCharacter, dankon, go, true });
+                        _mRemoveShader.Invoke(me, new object[] { 0, _otCharacter, dankon, go, true });
+                        already = dankon.shader != null && dankon.shader.name == OrgInsideShader;
+                        LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: '" + cc.name + "' carried the OLD in-place penis conversion -> restored '"
+                            + (dankon.shader != null ? dankon.shader.name : "?") + "' and rebuilding it as carve + redraw copies."
+                            + (already ? "  STILL OrgInside - the record did not clear." : ""));
+                        AutoBodyReveal.PenisUpgraded = !already;
+                    }
+                }
+
+                // COPY MODE (the behavior): the card's penis shader (KKUTS etc.) stays on the
+                // ORIGINAL material - the x-ray lives on an ADDED ME copy: OrgInside +
+                // OutsideOfBodyAlpha=0 renders ONLY the in-body part through the womb window, while the
+                // original keeps rendering the outside part with its own effects (inside it is
+                // depth-hidden by the body as always, so the two never double-draw). Hand-made copies
+                // are NEVER touched: adopt only a copy already carrying OrgInside, or configure the
+                // one appended here (snapshot-diff, like the clothes path). NO FALLBACK (hard rule): if the
+                // copy can't be created, fail LOUD and apply nothing - the main material is never
+                // converted. A main already converted by an OLDER build/scene takes the tail path below
+                // (floats kept in sync; no second OrgInside stacked on top).
                 if (!already)
                 {
                     if (_mCopyRemove == null)
@@ -865,7 +1048,11 @@ namespace LiquidWobbleMPB
                     }
                     Material copy = null;
                     foreach (var m in penisR.sharedMaterials)
-                        if (m != null && m.shader != null && m.shader.name == OrgInsideShader && m.name.Contains(".MECopy")) { copy = m; break; }
+                        // NOT a copy sitting on a redraw queue: an old scene can leave OrgInside on
+                        // MECopy2 as well, and taking the first match made the REDRAW the carve - both
+                        // copies then landed on the carve's queue and the redraw lost its slot.
+                        if (m != null && m.shader != null && m.shader.name == OrgInsideShader && m.name.Contains(".MECopy")
+                            && !QueueOk(m.renderQueue, OriginalRedrawQueue, OriginalRedrawQueueUp)) { copy = m; break; }
                     if (copy == null)
                     {
                         var before = new List<Material>(penisR.sharedMaterials);
@@ -878,15 +1065,21 @@ namespace LiquidWobbleMPB
                             return false;
                         }
                         _mSetShader.Invoke(me, new object[] { 0, _otCharacter, copy, OrgInsideShader, go, true });
-                        DirectSetShader(copy, go, OrgInsideShader);   // b940: the flip happens NOW; the ME call above is persistence only
+                        DirectSetShader(copy, go, OrgInsideShader);   // the flip happens NOW; the ME call above is persistence only
                     }
+                    // The carve normally has NO queue record - it just follows CloXray/OrgInside's tag. An
+                    // upgrade has to state it, or the carve stays at the legacy 3501 while everything
+                    // around it moves below 2500.
+                    if (UpgradeStack && copy.renderQueue != PenisCarveQueueUp)
+                        SetQueuePersisted(me, copy, go, PenisCarveQueueUp);
                     _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "StencilBody",        (float)stencil,       go, true });
                     _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "StencilBody_Plus_1", (float)(stencil + 1), go, true });
                     _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "OutsideOfBodyAlpha", 0f,                   go, true });   // inside-only: the ORIGINAL owns the outside look
                     // Shield (shader v389): the carve writes NEAR depth over the outside-body penis
-                    // silhouette so copy2's re-draw is depth-rejected there.
+                    // silhouette so copy2's re-draw is depth-rejected there - outside the body the
+                    // look stays 100% the original material's own painting (no double outlines/rim).
                     _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "OutsideShieldDepth", 1f,                   go, true });
-                    // b948: skin textures alpha-fade at the BASE SEAM (to blend into the torso). The
+                    // skin textures alpha-fade at the BASE SEAM (to blend into the torso). The
                     // carve blends mainTex.a - at those texels it painted nothing and the veil shone
                     // through the punch as the white base sliver. In-window the torso is not painted,
                     // so the carve must be opaque; the womb materials never set this and keep their
@@ -895,21 +1088,39 @@ namespace LiquidWobbleMPB
                     if (bottomWindow >= 0f)
                         _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "BottomWindow",   bottomWindow,         go, true });
 
-                    // SECOND copy (b465) = the ORIGINAL LOOK re-drawn through the window: the user's
-                    // shader stays UNTOUCHED on it, only the render queue is raised to 3502 — after
+                    // SECOND copy = the ORIGINAL LOOK re-drawn through the window: the card's
+                    // shader stays UNTOUCHED on it, only the render queue is raised to 3502 - after
                     // copy1's in-window depth carve (OrgInside, 3501), in the veil's queue (transparent
                     // queues sort back-to-front, so the nearer skin veil still tints over the deeper
                     // penis). In the window the penis now renders with the ORIGINAL shading (KKUTS
                     // effects intact, painting over copy1's OrgInside color at equal depth); outside
                     // the body it re-draws the identical look over the original (benign); inside the
                     // body but outside the window the body depth still occludes it. Identity: OURS = a
-                    // .MECopy with a NON-CloXray shader at exactly queue 3502 (user copies keep their
+                    // .MECopy with a NON-CloXray shader at exactly queue 3502 (hand-made copies keep their
                     // own queue); otherwise created via snapshot-diff, like copy1.
                     Material copy2 = null;
                     foreach (var m in penisR.sharedMaterials)
                         if (m != null && !ReferenceEquals(m, copy) && m.name.Contains(".MECopy") &&
                             (m.shader == null || !m.shader.name.StartsWith("CloXray/")) &&
-                            m.renderQueue == OriginalRedrawQueue) { copy2 = m; break; }
+                            QueueOk(m.renderQueue, OriginalRedrawQueue, OriginalRedrawQueueUp)) { copy2 = m; break; }
+                    // Say it out loud if the damage is already done. Two OrgInside copies on one penis
+                    // means an older build made the REDRAW a second carve; which one is which can no
+                    // longer be told apart from here, and guessing would throw away whichever one was
+                    // actually wants. Name both and let them delete one in Material Editor.
+                    {
+                        int orgCopies = 0; string names = "";
+                        foreach (var m in penisR.sharedMaterials)
+                            if (m != null && m.shader != null && m.shader.name == OrgInsideShader && m.name.Contains(".MECopy"))
+                            { orgCopies++; names += (names.Length > 0 ? " + " : "") + m.name + "@" + m.renderQueue; }
+                        if (orgCopies > 1)
+                            LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: '" + cc.name + "' has " + orgCopies
+                                + " OrgInside penis copies (" + names + "). An older build turned the redraw into a second carve."
+                                + " Delete the one you do not want in Material Editor - this cannot be guessed safely.");
+                    }
+                    // Adopted from a scene on the OTHER stack: move it, do not leave it behind and do not
+                    // make a third copy. Keying the search on one exact queue is what produced MECopy3.
+                    if (copy2 != null && UpgradeStack && copy2.renderQueue != OriginalRedrawQueueUp)
+                        SetQueuePersisted(me, copy2, go, OriginalRedrawQueueUp);
                     if (copy2 == null)
                     {
                         var before2 = new List<Material>(penisR.sharedMaterials);
@@ -921,13 +1132,13 @@ namespace LiquidWobbleMPB
                             LiquidWobbleMPBPlugin._logger?.LogError("MEBridge: penis ORIGINAL-LOOK copy not created on '" + cc.name + "' (second MaterialCopyRemove had no effect) — fix the copy path; the in-window look stays OrgInside until then.");
                             return false;
                         }
-                        SetQueuePersisted(me, copy2, go, OriginalRedrawQueue);
+                        SetQueuePersisted(me, copy2, go, Q(OriginalRedrawQueue, OriginalRedrawQueueUp));
                     }
-                    // b947: BP SoS + KKUTS clip the GLANS at the stock _Cutoff 0.5 - the glans texels sit
+                    // BP SoS + KKUTS clip the GLANS at the stock _Cutoff 0.5 - the glans texels sit
                     // under it. In AIR that is a small hole in the original material; in-window the
                     // original-look redraw clips the same texels, nothing repaints the punched depth and
                     // the veil shines bright white through the hole (the "white cap" at the tip - proven
-                    // by the b946 balls-removed isolation + _Cutoff=0.50 in the material dump). The
+                    // by the balls-removed isolation + _Cutoff=0.50 in the material dump). The
                     // documented fix is Cutoff=0 on skin (the old manual ME edit) - enforced here on the
                     // original AND the redraw clone. ME float records persist and replay; the OrgInside
                     // carve ignores the body cutoff and needs nothing.
@@ -940,14 +1151,38 @@ namespace LiquidWobbleMPB
                     }
                     if (copy2.HasProperty("_Cutoff") && copy2.GetFloat("_Cutoff") > 0f)
                         _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy2, "Cutoff", 0f, go, true });
-                    LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: penis x-ray COPIES on '" + cc.name + "': carve '" + copy.name + "' -> " + OrgInsideShader + " (stencil " + stencil + "/" + (stencil + 1) + ") + original-look '" + copy2.name + "' @" + OriginalRedrawQueue + " ('" + dankon.name + "' untouched; in-window look = the original shader).");
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: penis x-ray COPIES on '" + cc.name + "': carve '" + copy.name + "' -> " + OrgInsideShader + " @" + copy.renderQueue + " (stencil " + stencil + "/" + (stencil + 1) + ") + original-look '" + copy2.name + "' @" + copy2.renderQueue + " ('" + dankon.name + "' untouched; in-window look = the original shader).");
+                    // INHERITANCE PROBE. CloXray/OrgInside multiplies its lighting by `_RampG`, which
+                    // it SAMPLES but does not DECLARE - so the value comes from whatever material was
+                    // copied. Her body and the womb carry one; a penis material may not, and an absent
+                    // ramp samples BLACK, which is how the garment ghost turned black. The carve is
+                    // normally hidden under the redraw, so the only place it would show is the base
+                    // seam where the redraw's own alpha fades.
+                    var rampTex = copy.HasProperty("_RampG") ? copy.GetTexture("_RampG") : null;
+                    if (rampTex == null)
+                        LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: penis carve '" + copy.name
+                            + "' has NO _RampG - its lighting samples black. Invisible under the redraw, but the base seam can read dark.");
+                    else if (debug)
+                        LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: penis carve ramp OK ('" + rampTex.name + "').");
                     return true;
                 }
-                // Stencil pair must match the FEMALE body the penis is seen through.
+                // Stencil pair MUST match the FEMALE body the penis is seen through (the same value EnsureBodyReveal
+                // stamps on her body via womb.OrganStencil()). Without this the OrgInside depth-clear only fires for a
+                // default pair-A womb (4/5); on any other pair (8/9,12/13,16/17) the penis stays hidden behind skin.
+                // OutsideOfBodyAlpha=1 keeps the outside-body part visible (already the OrgInside default; re-asserted
+                // in case a card lowered it).
                 _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, dankon, "StencilBody",        (float)stencil,       go, true });
                 _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, dankon, "StencilBody_Plus_1", (float)(stencil + 1), go, true });
                 _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, dankon, "OutsideOfBodyAlpha", outsideAlpha,        go, true });
-                _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, dankon, "OpaqueMainTex",      1f,                  go, true });   // b948: base-seam alpha fade must not blend away in-window
+                _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, dankon, "OpaqueMainTex",      1f,                  go, true });   // base-seam alpha fade must not blend away in-window
+                // IN-PLACE conversion (the main game's path): this is the ORIGINAL material, not a copy, so
+                // nothing has ever written its queue - it just takes the OrgInside tag, which is the LEGACY
+                // 3501. Every OTHER layer gets an explicit queue, so on the upgraded stack the womb dropped
+                // to 2482-2485 and the penis stayed behind at 3501, drawing after the whole stack instead of
+                // inside it - which is the penis showing through his own body in Free-H. State it here too.
+                // Only when it differs, so the legacy path never gains a gratuitous record on his card.
+                int wantPenisQ = Q(PenisCarveQueue, PenisCarveQueueUp);
+                if (dankon.renderQueue != wantPenisQ) SetQueuePersisted(me, dankon, go, wantPenisQ);
                 if (bottomWindow >= 0f)   // <0 = leave as-is (Studio: ME owns the slider)
                     _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, dankon, "BottomWindow",    bottomWindow,       go, true });
                 LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: penis x-ray on '" + cc.name + "': '" + dankon.name + "' -> " + OrgInsideShader + " (stencil " + stencil + "/" + (stencil + 1) + ", OutsideOfBodyAlpha=" + outsideAlpha.ToString("F2") + ")" + (already ? " [shader already set]" : "") + ".");
@@ -960,18 +1195,134 @@ namespace LiquidWobbleMPB
             }
         }
 
-        // XRAY-CHAIN dump (b511, KKS penis-invisible-in-womb research): one line per material for the
-        // male penis renderer, the female BODY renderer and the womb SMR — name, shader, renderQueue
+        // XRAY-CHAIN dump (KKS penis-invisible-in-womb research): one line per material for the
+        // male penis renderer, the female BODY renderer and the womb SMR - name, shader, renderQueue
         // and the stencil/alpha floats the window chain depends on. Diffing a KK dump against a KKS
         // dump pinpoints which link lands differently (queue not applied, float missing on the copy,
         // different original shader/queue...). Debug-gated, called once per penis x-ray apply.
-        // ONE-SHOT PER CHARACTER SET (b880). This fires on every penis x-ray apply and runs to ~296 lines
-        // a session — it was added to find the real balls material name for the white-balls bug, which is
-        // solved. Repeating it now just buries the lines we are actually reading in a bug-report log.
+        // ONE-SHOT PER CHARACTER SET. This fires on every penis x-ray apply and runs to ~296 lines
+        // a session - it was added to find the real balls material name for the white-balls bug, which is
+        // solved. Repeating it now just buries the lines actually being read in a bug-report log.
         private static readonly System.Collections.Generic.HashSet<string> _chainDumped = new System.Collections.Generic.HashSet<string>();
+
+
+        // THE RULE: every stencil stamp draws before every organ. A stamp marks the window; an organ
+        // tests that mark. A stamp scheduled after the organ it opens marks a window nothing will read
+        // again this frame, and the organ is simply absent - no error, no warning, just missing pixels.
+        //
+        // Both shipped stacks satisfy it (legacy stamps 2499/2500/2501 vs organs 3500-3503; upgraded
+        // 2478/2479/2480 vs 2482-2485). What broke Free-H was neither stack but a MIX: her body and the
+        // womb upgraded while the garments were rewritten back to legacy, putting the garment cut at
+        // 2499 behind the womb organ at 2482. Cheap to state, invisible to the eye, so state it.
+        private static float _stackAssertNext;
+        public static void AssertStackOrder(Component cc, Component womb, string when)
+        {
+            if (cc == null) return;
+            try
+            {
+                int worstStamp = int.MinValue, firstOrgan = int.MaxValue;
+                string stampName = null, organName = null;
+                foreach (var root in new[] { cc, womb })
+                {
+                    if (root == null) continue;
+                    foreach (var r in root.GetComponentsInChildren<Renderer>(true))
+                    {
+                        if (r == null || r.sharedMaterials == null) continue;
+                        foreach (var m in r.sharedMaterials)
+                        {
+                            if (m == null || m.shader == null) continue;
+                            string sh = m.shader.name;
+                            // BodyRevealExtra is the VEIL and is meant to draw after the organs - it is
+                            // a redraw, not a stamp. Only BodyReveal marks the window.
+                            if (sh == BodyRevealShader)
+                            {
+                                if (m.renderQueue > worstStamp) { worstStamp = m.renderQueue; stampName = m.name; }
+                            }
+                            else if (sh == "CloXray/Organ" || sh == "CloXray/OrgInside" || sh == "CloXray/Liquid")
+                            {
+                                if (m.renderQueue < firstOrgan) { firstOrgan = m.renderQueue; organName = m.name; }
+                            }
+                        }
+                    }
+                }
+                if (stampName == null || organName == null) return;      // nothing to compare yet
+                if (worstStamp < firstOrgan) return;                     // the rule holds
+                if (Time.unscaledTime < _stackAssertNext) return;
+                _stackAssertNext = Time.unscaledTime + 5f;
+                LiquidWobbleMPBPlugin._logger?.LogError("CloXray: RENDER-QUEUE STACK IS MIXED (" + when
+                    + ") - the stamp '" + stampName + "' draws at " + worstStamp + ", AFTER the organ '"
+                    + organName + "' at " + firstOrgan + ". A stamp behind the organ it opens marks a"
+                    + " window nothing reads, so that layer is invisible with no other symptom. Both"
+                    + " stacks are internally consistent (legacy ~2499/3500, upgraded ~2478/2482); this"
+                    + " is a MIX of the two. Full material dump follows.");
+                TraceGarments(cc, "stack assertion failed");
+            }
+            catch (Exception e)
+            { LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: AssertStackOrder threw: " + e.Message); }
+        }
+
+        // Identity of what is actually on the garment renderers right now. Names cannot answer this -
+        // MaterialEditor clones carry the same name - so every line prints instance ids.
+        public static void TraceGarments(Component cc, string when)
+        {
+            if (cc == null) return;
+            try
+            {
+                Init();
+                const BindingFlags ANY = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                GameObject[] slots = null;
+                var fC = cc.GetType().GetField("objClothes", ANY);
+                if (fC != null) slots = fC.GetValue(cc) as GameObject[];
+                if (slots == null)
+                {
+                    var pC = cc.GetType().GetProperty("objClothes", ANY);
+                    if (pC != null) slots = pC.GetValue(cc, null) as GameObject[];
+                }
+                if (slots == null) return;
+                var sb = new System.Text.StringBuilder();
+                sb.Append("CloXray GARMENT-ID (").Append(when).Append(") '").Append(cc.name).Append("'");
+                foreach (int kind in ClothesKinds)
+                {
+                    if (kind >= slots.Length || slots[kind] == null || !slots[kind].activeInHierarchy) continue;
+                    foreach (var r in slots[kind].GetComponentsInChildren<Renderer>(true))
+                    {
+                        if (r == null || r.sharedMaterials == null) continue;
+                        sb.Append("\n  rend '").Append(r.name).Append("' id=").Append(r.GetInstanceID())
+                          .Append(" enabled=").Append(r.enabled).Append(" vis=").Append(r.isVisible)
+                          .Append(" sub=").Append(SubMeshCountOf(r)).Append(" mats=").Append(r.sharedMaterials.Length);
+                        foreach (var m in r.sharedMaterials)
+                        {
+                            sb.Append("\n      ").Append(m == null ? "<null>" : m.name).Append(" id=")
+                              .Append(m == null ? 0 : m.GetInstanceID()).Append(" q=")
+                              .Append(m == null ? -1 : m.renderQueue).Append(" sh=")
+                              .Append(m == null || m.shader == null ? "NULL" : m.shader.name);
+                            // The numbers that decide whether fabric is painted over the womb.
+                            // alpha = textureAlpha * (1 - _XrayAlpha): 0 = solid fabric, 1 = invisible.
+                            if (m == null) continue;
+                            foreach (var prop in new[] { "_XrayAlpha", "_StencilRef", "_StampZWrite", "_StampZTest", "_StampPull" })
+                                if (m.HasProperty(prop))
+                                    sb.Append(' ').Append(prop.Substring(1)).Append('=')
+                                      .Append(m.GetFloat(prop).ToString("F3"));
+                            if (m.HasProperty("_Color")) sb.Append(" colA=").Append(m.GetColor("_Color").a.ToString("F2"));
+                        }
+                    }
+                }
+                LiquidWobbleMPBPlugin._logger?.LogWarning(sb.ToString());
+            }
+            catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: TraceGarments threw: " + e.Message); }
+        }
+
+        private static int SubMeshCountOf(Renderer r)
+        {
+            var smr = r as SkinnedMeshRenderer;
+            if (smr != null && smr.sharedMesh != null) return smr.sharedMesh.subMeshCount;
+            var mf = r.GetComponent<MeshFilter>();
+            return (mf != null && mf.sharedMesh != null) ? mf.sharedMesh.subMeshCount : -1;
+        }
+
         public static void DumpXrayChain(Component male, Component female, Component womb)
         {
-            // b884: keyed on POSE too. One dump per character set was right for log volume, but a
+            // keyed on POSE too. One dump per character set was right for log volume, but a
             // reporter has the penis rendering correctly on apply and degrading on a POSE CHANGE - and
             // nothing here re-checks the x-ray then, so a single apply-time dump shows only the healthy
             // state. One dump per pose brackets the transition: the last good chain and the first bad one
@@ -994,9 +1345,9 @@ namespace LiquidWobbleMPB
                         foreach (var p in new[] { "_StencilBody", "_StencilBody_Plus_1", "_OutsideOfBodyAlpha", "_OutsideShieldDepth", "_BottomWindow", "_StencilOrgan", "_OutBodyBackOcclude", "_AlphaOptionZWrite" })
                             if (m.HasProperty(p)) sb.Append(" ").Append(p.Substring(1)).Append("=").Append(m.GetFloat(p).ToString("F0"));
                         // TEXTURE MAPPING. KPlug sets _MainTex OFFSET per body part - Dick (-0.5, 0.5)
-                        // against Ball (0, 0.5) - and our ME copies inherit whatever it left there. A
+                        // against Ball (0, 0.5) - and the ME copies inherit whatever it left there. A
                         // half-texture offset samples the wrong region and reads blank, which on screen is
-                        // indistinguishable from white. Every chain we have compared was identical in
+                        // indistinguishable from white. Every chain compared so far was identical in
                         // everything the dump prints; this is the one thing KPlug demonstrably changes
                         // that it did NOT print.
                         if (m.HasProperty("_MainTex"))
@@ -1020,7 +1371,7 @@ namespace LiquidWobbleMPB
                         if (penisR != null) break;
                     }
                 dump("MALE penis", penisR);
-                // BALLS STAMP STATE (b933): shader, queue and the organ-value ref on the dan_f copy.
+                // BALLS STAMP STATE: shader, queue and the organ-value ref on the dan_f copy.
                 if (male != null)
                     foreach (var r in male.GetComponentsInChildren<SkinnedMeshRenderer>(true))
                     {
@@ -1031,7 +1382,7 @@ namespace LiquidWobbleMPB
                             if (m == null) continue;
                             sb.Append("\n").Append("    '").Append(m.name).Append("' q=").Append(m.renderQueue)
                               .Append(" sh=").Append(m.shader != null ? m.shader.name : "NULL");
-                            // b943: the printer was blind to the carve - it asked only for BodyReveal stamp
+                            // the printer was blind to the carve - it asked only for BodyReveal stamp
                             // props, so an OrgInside copy printed bare and a default-float replay was
                             // indistinguishable from a configured one. Print both role's props plus the mask.
                             foreach (var pn in new[] { "_StencilRef", "_StampZWrite", "_StampZTest",
@@ -1046,7 +1397,7 @@ namespace LiquidWobbleMPB
                 // EVERY renderer+material on the male, one line each: the balls material is not named
                 // "tama" on this rig, so the white-balls report needs the real names before it can be
                 // diagnosed. Shader + MainTex + colour distinguish "untextured", "wrong shader" and
-                // "white tint" — three faults that look identical on screen.
+                // "white tint" - three faults that look identical on screen.
                 if (male != null)
                     foreach (var r in male.GetComponentsInChildren<SkinnedMeshRenderer>(true))
                     {
@@ -1093,9 +1444,9 @@ namespace LiquidWobbleMPB
         private static MethodInfo _mSetTexFile;
         private static bool _regionMaskMissingLogged;
 
-        // ---- DEFERRED MASK ASSERT (b921) --------------------------------------------------------
+        // ---- DEFERRED MASK ASSERT --------------------------------------------------------
         // ME's SetMaterialShader is DEFERRED: the apply log has repeatedly shown the copy still wearing
-        // Shader Forge/main_skin at the moment we finished configuring it, with the flip to BodyReveal
+        // Shader Forge/main_skin at the moment configuration finished, with the flip to BodyReveal
         // landing later. Setting _RegionMask in that gap targets a material that does not HAVE the
         // property yet, so the edit is dropped - and BodyReveal's default mask is WHITE, which stamps
         // EVERYWHERE. That is exactly "bare hands do not block". So the mask is asserted from Update:
@@ -1104,7 +1455,7 @@ namespace LiquidWobbleMPB
         {
             public object me; public Material copy; public GameObject go; public string who; public bool debug;
             public int frames; public int setAttempts; public int lastSetFrame;
-            public bool reflipTried;   // b939: one mid-wait SetShader retry before the timeout
+            public bool reflipTried;   // one mid-wait SetShader retry before the timeout
         }
         private static readonly System.Collections.Generic.List<PendingMask> _pendingMasks = new System.Collections.Generic.List<PendingMask>();
 
@@ -1127,7 +1478,7 @@ namespace LiquidWobbleMPB
                 pm.frames++;
                 if (!pm.copy.HasProperty("_RegionMask"))
                 {
-                    // b939: a copy whose flip never lands is not just maskless - it is a FULLY VISIBLE
+                    // a copy whose flip never lands is not just maskless - it is a FULLY VISIBLE
                     // duplicate skin draw at 2500 (still the body shader): double reflective skin reads
                     // as blown-out white, washes alpha garments drawn over it into invisibility ("part
                     // of the top missing"), and under the pause menu's post-processing whites out the
@@ -1156,7 +1507,7 @@ namespace LiquidWobbleMPB
                 // retried with spacing, loudly giving up after 6 attempts.
                 if (pm.copy.GetTexture("_RegionMask") != null)
                 {
-                    if (pm.setAttempts == 0) { _pendingMasks.RemoveAt(i); continue; }   // present before we set - nothing to prove
+                    if (pm.setAttempts == 0) { _pendingMasks.RemoveAt(i); continue; }   // present before the set - nothing to prove
                     if (pm.frames - pm.lastSetFrame >= 30)
                     {
                         if (pm.debug) LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: region mask STICKY on '" + pm.who + "' (attempt " + pm.setAttempts + ").");
@@ -1178,13 +1529,19 @@ namespace LiquidWobbleMPB
             }
         }
 
-        // ---- MASK HEAL --------------------------------------------------------------------------
-        // ME cannot persist texture records for these copies: its replay after a mid-H body rebuild
-        // restores shader/floats/queue but NOT the mask, and the default mask is WHITE = passes
-        // everywhere. Holding Material references dies with the rebuild too (replay makes new
-        // objects), so the registry is reference-free: remember WHAT to look for - character root,
-        // base name, shader role, file - and re-feed any matching maskless copy the pump finds.
-        // Un-apply needs no bookkeeping: removed copies stop existing and the scan finds nothing.
+        // ---- MASK HEAL (replaces the earlier watch) ---------------------------------------------
+        // Mask TEXTURES cannot persist in ME's records (SetMaterialTexture's
+        // record never stores it), while shaders, floats and queues deterministically do.
+        // So after any mid-H body rebuild, ME's record replay produces a fully configured copy with
+        // NO mask - and the shaders' default masks are WHITE, which passes everywhere: the dan_f
+        // carve then paints the whole sack through clothes in OrgInside tint, and the body stamp
+        // quietly loses its limb blocking. The earlier watch pinned the Material OBJECT and died with
+        // it: replay creates a NEW object, the old reference nulls, the pump pruned it, and the
+        // replayed copy ran maskless until the next hotkey. This registry is reference-free - it
+        // remembers WHAT to look for (character root, base name, shader role), and the pump scans
+        // for any matching .MECopy that is masked-by-intent (cutoff > 0) but has no texture,
+        // whoever created it. Removal needs no bookkeeping: un-applied copies stop existing and the
+        // scan simply finds nothing.
         private class MaskHeal { public GameObject root; public string baseName; public string shaderName; public string file; }
         private static readonly System.Collections.Generic.List<MaskHeal> _maskHeal = new System.Collections.Generic.List<MaskHeal>();
         private static int _maskWatchFrame;
@@ -1262,7 +1619,7 @@ namespace LiquidWobbleMPB
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: direct region mask set failed: " + e.Message); return false; }
         }
 
-        // Forensics: what does ME's controller ACTUALLY hold after our invoke? The decompiled 4.0.3
+        // Forensics: what does ME's controller ACTUALLY hold after the invoke? The decompiled 4.0.3
         // adds the record unconditionally, yet the UI showed "No Texture" - one of the links lies,
         // and this prints which: the record list, and every matching material's live state.
         private static void DumpMeTextureState(object me, Material copy, string who)
@@ -1323,14 +1680,14 @@ namespace LiquidWobbleMPB
                 args[0] = 0; args[1] = _otCharacter; args[2] = copy; args[3] = "RegionMask"; args[4] = path; args[5] = go;
                 for (int i = 6; i < ps.Length; i++)
                     args[i] = ps[i].ParameterType == typeof(bool) ? (object)false : null;
-                // b925: FUNCTION FIRST, persistence second. Six verified ME invokes produced neither a
+                // FUNCTION FIRST, persistence second. Six verified ME invokes produced neither a
                 // texture on the material nor a record in ME's own UI (decompiled 4.0.3 says both are
                 // unconditional - the forensic dump below finds out which link actually breaks). The
                 // mask being LIVE must not be hostage to that: load the PNG ourselves and set it on
                 // every matching material directly. Reloads re-run this pump, so function survives
                 // even if ME never persists the edit.
                 bool direct = DirectSetRegionMask(go, copy, path);   // path = this caller's mask file
-                if (copy.shader != null) HealMask(go, BaseName(copy), copy.shader.name, path);   // b943: reference-free re-assert after body rebuilds
+                if (copy.shader != null) HealMask(go, BaseName(copy), copy.shader.name, path);   // reference-free re-assert after body rebuilds
                 _mSetTexFile.Invoke(me, args);   // still try ME, for card/scene persistence
                 bool landed = false;
                 try { landed = copy.GetTexture("_RegionMask") != null; } catch { }
@@ -1348,12 +1705,12 @@ namespace LiquidWobbleMPB
         }
 
         // ── PENIS LOOK SNAPSHOT ───────────────────────────────────────────────────────────────────────
-        // The one thing we know for certain about the KPlug case: the penis is CORRECT immediately after
+        // The one certainty about the KPlug case: the penis is CORRECT immediately after
         // the first apply, and only goes wrong later when KPlug re-writes its shader/texture package.
         // So stop reasoning about what the values ought to be - record the whole set while it is known
         // good, and put it back whenever KPlug disturbs it.
         //
-        // This is deliberately NOT the b892 approach of syncing from the live original. That copied
+        // This deliberately does NOT sync from the live original. That copied
         // KPlug's offset onto the CARVE copy too, and the carve is what tints the in-window penis - it
         // was the one part that had always looked right, and overwriting it turned "white outside" into
         // "white everywhere". The snapshot keeps each material's own values, whatever they are.
@@ -1431,19 +1788,19 @@ namespace LiquidWobbleMPB
 
         public static void ForgetPenisLook() { _penisSnap.Clear(); _penisSnapOwner = 0; }
 
-        // ---- ME SHADER REGISTRY DUMP (b920) -----------------------------------------------------
+        // ---- ME SHADER REGISTRY DUMP -----------------------------------------------------
         // Every disk source is exonerated (one zipmod, current props; no other manifest among 7416
         // declares CloXray; no ME shader cache; no loose abdata bundle) - yet materials end up bound to
-        // a CloXray/BodyReveal WITHOUT the b898+ properties. The remaining suspect is MaterialEditor's
+        // a CloXray/BodyReveal WITHOUT the newer properties. The remaining suspect is MaterialEditor's
         // in-memory shader dictionary. Dump every CloXray entry it holds, with instance id and property
         // fingerprint, so the next log convicts or exonerates it.
-        // ---- DIRECT SHADER SET (b940) -----------------------------------------------------------
+        // ---- DIRECT SHADER SET -----------------------------------------------------------
         // ME's SetMaterialShader applies via name lookups with two silent failure modes (an
         // instanced-materials reference check on the create path, and GetObjectMaterials name misses
         // on the set path), and H-mode body rebuilds re-roll those dice constantly. The result was a
         // copy left wearing the VISIBLE body shader - the blown-white duplicate skin behind weeks of
-        // vanishing-garment reports. Same cure as the b925 mask: WE set the shader directly on the
-        // exact material references we hold, resolved from ME's own LoadedShaders registry; ME's call
+        // vanishing-garment reports. Same cure as the mask: set the shader directly on the
+        // exact material references held here, resolved from ME's own LoadedShaders registry; ME's call
         // stays for scene persistence only. The registry queue is applied like ME would.
         private static System.Collections.IDictionary _meShaderRegistry;
         private static Shader ResolveMeShader(string shaderName, out int? registryQueue)
@@ -1565,7 +1922,11 @@ namespace LiquidWobbleMPB
             return n == PenisMat;
         }
 
-        // Does this character carry a real penis material (cm_m_dankon)?
+        // Does this character carry a real penis material (cm_m_dankon)? Used to gate the penis features so the
+        // shared k_f_dan FK bones - which KK_AdditionalFKNodes ALSO adds to females - don't trigger on a normal female.
+        // Penis mesh that is actually DRAWN. Every female carries a hidden penis object, so a test that
+        // counts inactive renderers would make any woman a penetration candidate - her own phantom entry
+        // marker sits at her crotch, exactly where her womb is.
         public static bool HasVisiblePenisMesh(Component cc)
         {
             if (cc == null) return false;
@@ -1591,7 +1952,38 @@ namespace LiquidWobbleMPB
             return false;
         }
 
-        /// Idempotently ensure the body ALSO has the BodyRevealExtra "skin veil" copy.
+        /// <summary>
+        /// Idempotently ensure the body ALSO has the BodyRevealExtra "skin veil" copy (the cosmetic
+        /// translucent-skin layer over the organ window, with the XrayAlpha slider).
+        /// A SECOND ME copy is required because one material has ONE render queue: the stamp must
+        /// draw before the organ, the veil after it. Run AFTER EnsureBodyReveal.
+        /// </summary>
+        /// The veil redraws HER SKIN over the window, so it needs the body's texture. An ME copy does
+        /// not reliably carry `_MainTex` (the body's is a runtime-composited texture, and ME cannot
+        /// persist texture records for these copies - the same reason the region mask needs healing),
+        /// and an unbound texture samples WHITE: lowering XrayAlpha then washed the window toward
+        /// white instead of toward skin. Re-feed it from the live source every time the copy is touched.
+        private static void EnsureVeilMainTex(Material veil, Material src, string who)
+        {
+            if (veil == null || src == null) return;
+            if (!veil.HasProperty("_MainTex") || !src.HasProperty("_MainTex")) return;
+            var want = src.GetTexture("_MainTex");
+            var have = veil.GetTexture("_MainTex");
+            // State readout: a body texture is usually a RUNTIME-COMPOSITED RenderTexture whose .name
+            // is EMPTY, which reads as "no texture" in any name-printing dump. Say null-vs-unnamed
+            // outright so that blank never gets mistaken for a missing texture again.
+            LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: skin veil on '" + who + "' texture check - source="
+                + (want == null ? "NULL" : "'" + want.name + "' (" + want.GetType().Name + ")")
+                + "  veil=" + (have == null ? "NULL" : "'" + have.name + "' (" + have.GetType().Name + ")")
+                + "  same=" + (have == want));
+            if (want == null || have == want) return;
+            veil.SetTexture("_MainTex", want);
+            veil.SetTextureOffset("_MainTex", src.GetTextureOffset("_MainTex"));
+            veil.SetTextureScale("_MainTex", src.GetTextureScale("_MainTex"));
+            LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: skin veil on '" + who + "' had no body texture - re-fed '"
+                + want.name + "' (an unbound texture samples white, which washed the x-ray window out).");
+        }
+
         public static bool EnsureBodyVeil(Component cc, int stencilPlus1, bool debug, bool overwriteExisting)
         {
             Init();
@@ -1617,22 +2009,26 @@ namespace LiquidWobbleMPB
                     }
                     else if (debug) LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: '" + cc.name + "' already has the skin veil. No-op.");
                     EnsureVeilQueue(me, existing, go);
+                    EnsureVeilMainTex(existing, FindByName(bodyR, "cf_m_body")
+                        ?? (bodyR.sharedMaterials.Length > 0 ? bodyR.sharedMaterials[0] : null), cc.name);
                     return true;
                 }
 
-                // Fresh copy. MaterialCopyRemove on the SOURCE adds a copy; verify one actually appeared
-                // (toggle semantics differ across ME versions.
+                // Fresh copy. MaterialCopyRemove on the SOURCE adds a copy; verify one actually
+                // appeared (toggle semantics differ across ME versions - fail loud, never guess).
                 var srcBody = FindByName(bodyR, "cf_m_body") ?? (bodyR.sharedMaterials.Length > 0 ? bodyR.sharedMaterials[0] : null);
                 if (srcBody == null) return false;
                 var copy = FindCopy(bodyR, BaseName(srcBody)) ?? CreateCopyTracked(me, bodyR, srcBody, go, "skin veil");
                 if (copy == null) return false;
 
                 _mSetShader.Invoke(me, new object[] { 0, _otCharacter, copy, BodyVeilShader, go, true });
-                DirectSetShader(copy, go, BodyVeilShader);   // b940: the flip happens NOW; the ME call above is persistence only
+                DirectSetShader(copy, go, BodyVeilShader);   // the flip happens NOW; the ME call above is persistence only
                 _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "StencilBody_Plus_1", (float)stencilPlus1, go, true });
-                // Initial x-ray strength - set only on creation.
+                // Initial x-ray strength - set ONLY on creation (a re-press never clobbers the
+                // per-scene slider tweaks; the existing-copy path above doesn't touch it).
                 _mSetFloat.Invoke(me, new object[] { 0, _otCharacter, copy, "XrayAlpha", LiquidWobbleMPBPlugin.CfgVeilAlpha, go, true });
                 EnsureVeilQueue(me, copy, go);
+                EnsureVeilMainTex(copy, srcBody, cc.name);
                 LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: applied skin veil to '" + cc.name + "' (copy='" + copy.name + "', stencil+1=" + stencilPlus1 + ", q=" + copy.renderQueue + "). XrayAlpha slider on that material controls x-ray strength.");
                 return true;
             }
@@ -1654,14 +2050,13 @@ namespace LiquidWobbleMPB
             return null;
         }
 
-        private static int CountCopies(SkinnedMeshRenderer r, string srcName)
-        {
-            int n = 0;
-            foreach (var m in r.sharedMaterials)
-                if (m != null && BaseName(m).StartsWith(srcName + ".MECopy")) n++;
-            return n;
-        }
-
+        // is this renderer parented under the HEAD/NECK branch of the skeleton? HAIR is very
+        // commonly worn as an ACCESSORY (extensions, ponytails, ahoge) and attaches under the head/
+        // neck bones; the Free-H accessory reveal was stamping CloXray/BodyReveal onto it, replacing
+        // its hair shader and changing the character's look (reported - main game only, since the
+        // accessory pass is Free-H only). Head/face/hair accessories can NEVER occlude the belly x-ray
+        // window, so they must be skipped. Gate on the skeleton attach bones (unambiguous), so even a
+        // long ponytail that hangs down to the waist is still excluded (it's under cf_j_head).
         private static readonly HashSet<string> HeadBranchBones = new HashSet<string>
         { "cf_j_neck", "cf_j_head", "cf_s_head", "p_cf_head_bone", "ct_head", "cf_J_FaceRoot", "cf_J_FaceBase" };
         private static bool IsHeadBranchAccessory(Transform t)
@@ -1671,6 +2066,8 @@ namespace LiquidWobbleMPB
             return false;
         }
 
+        // the accessory's declared attach anchor (KK coordinate 'parentKey'). Head/hair/face
+        // anchors mean it frames the head and can't cover the belly - skip it.
         private static readonly string[] HeadKeyMarkers = { "head", "hair", "kami", "megane", "earring", "nose", "mouth", "face", "mimi" };
         private static bool IsHeadRegionParent(string parentKey)
         {
@@ -1681,7 +2078,8 @@ namespace LiquidWobbleMPB
         }
 
         // Read ChaControl.nowCoordinate.accessory.parts[slot].parentKey (the game's authoritative
-        // per-accessory attach anchor), resolved lazily off the live objects.
+        // per-accessory attach anchor), resolved lazily off the live objects. Null on any miss - the
+        // runtime attach-bone walk still guards, and a bind failure is logged ONCE so it's visible.
         private static bool _accReflWarned;
         private static System.Reflection.PropertyInfo _pNowCoord; private static System.Reflection.FieldInfo _fNowCoord, _fAccessory, _fParts, _fParentKey;
         private static string AccessoryParentKey(Component cc, int slot)
@@ -1722,11 +2120,11 @@ namespace LiquidWobbleMPB
         /// <summary>
         /// Dump a garment renderer's material array against its submeshes.
         /// Unity pairs materials[i] with submesh i; a material past subMeshCount re-draws the LAST submesh,
-        /// and a submesh with no material is not drawn at all. So appending our BodyReveal copy to a
+        /// and a submesh with no material is not drawn at all. So appending a BodyReveal copy to a
         /// garment whose array is already irregular can leave a real submesh drawing with an x-ray
         /// material - transparent outside the womb window - and the garment (or part of it) disappears.
         /// The body underneath is already masked away by the clothing state, so the result is a HOLE, not
-        /// bare skin. We warn on the count mismatch but have never shown the actual pairing; this does.
+        /// bare skin. The count mismatch is warned about but the actual pairing was never shown; this does.
         /// </summary>
         private static void DumpGarmentPairing(Renderer r, string when)
         {
@@ -1740,7 +2138,7 @@ namespace LiquidWobbleMPB
                 sb.Append("[clothes]   ").Append(when).Append(" '").Append(r.name).Append("': subMeshCount=")
                   .Append(subs < 0 ? "n/a" : subs.ToString()).Append(" materials=").Append(mats.Length);
                 // Only flag pairings that actually BREAK. materials > subMeshCount is the normal, intended
-                // result of appending our copy: the extra re-draws the last submesh, which for a
+                // result of appending the copy: the extra re-draws the last submesh, which for a
                 // single-submesh garment is the whole thing - that is how the window is drawn, not a fault.
                 // The real faults are a submesh with no material (never drawn) and a MULTI-submesh garment,
                 // where the appended copy only ever covers the last one and the rest keep their originals.
@@ -1757,7 +2155,7 @@ namespace LiquidWobbleMPB
                     string sh = m.shader != null ? m.shader.name : "(no shader)";
                     string extra = "";
                     if (m.HasProperty("_StencilRef")) extra += " StencilRef=" + m.GetFloat("_StencilRef");
-                    // b938: adopted copies persist values from ANY past build - a pre-b899 stamp still
+                    // adopted copies persist values from ANY past build - an early stamp still
                     // writing depth on an ALPHA garment (like the q=3100 sweater) depth-rejects the
                     // garment's own later draw = it visually disappears. Print the whole stamp state.
                     if (m.HasProperty("_StampZWrite")) extra += " StampZWrite=" + m.GetFloat("_StampZWrite").ToString("F0");
@@ -1773,7 +2171,7 @@ namespace LiquidWobbleMPB
         /// <summary>
         /// A worn-item stamp must not write DEPTH. Correct on the body (the skin already wrote that
         /// depth at 2350) but never on clothes or accessories: a transparent garment writes no depth of
-        /// its own, so our copy at 2500 would lay an opaque footprint for it and depth-reject whatever
+        /// its own, so a copy at 2500 would lay an opaque footprint for it and depth-reject whatever
         /// is behind - which is how a clothes stamp erases a character standing behind her.
         /// Applied to EXISTING copies too, not just new ones: the depth write is a defect, so leaving it
         /// on a copy an older build created would keep that scene broken.
@@ -1787,10 +2185,116 @@ namespace LiquidWobbleMPB
         }
 
         // KK clothes kinds stamped by EnsureClothesReveal: top, bot, bra, shorts, panst.
+        // (Gloves/socks/shoes never cover the womb; skipping them keeps ME's record count down.)
         private static readonly int[] ClothesKinds = { 0, 1, 2, 3, 5 };
 
-        /// Idempotently stamp every WORN (active) torso garment with a BodyReveal copy at the given stencil.
-        public static bool EnsureClothesReveal(Component cc, int stencil, bool debug)
+        // Install (or keep in sync) the translucent garment redraw for one garment SOURCE material.
+        // The copy is a clone of the garment, so it carries the garment's own textures and colors;
+        // swapping it to the skin veil's shader gives it the window stencil gate and the XrayAlpha
+        // fade. XrayAlpha is written ONCE at create (garment default 0.7 - fabric reads better a
+        // little more present than the skin veil's 0.9) and never on a
+        // re-press - the per-garment slider is hand-owned afterwards, like the skin veil's.
+        private static void EnsureGarmentVeil(object me, int slot, object objType, Renderer r, Material src,
+                                              string baseName, int stencil, GameObject go, string who, bool allowCreate)
+        {
+            try
+            {
+                Material veil = null;
+                foreach (var m in r.sharedMaterials)
+                    if (m != null && m.name.StartsWith(baseName + ".MECopy") &&
+                        m.shader != null && m.shader.name == BodyVeilShader) { veil = m; break; }
+                if (veil != null)
+                {
+                    if (veil.HasProperty("_StencilBody_Plus_1") && Mathf.RoundToInt(veil.GetFloat("_StencilBody_Plus_1")) != stencil + 1)
+                        _mSetFloat.Invoke(me, new object[] { slot, objType, veil, "StencilBody_Plus_1", (float)(stencil + 1), go, true });
+                    // The queue was written only at CREATE, so a ghost made before the upgrade
+                    // stayed on the legacy queue forever. Accepts either stack unless this pass is upgrading.
+                    if (UpgradeStack ? veil.renderQueue != GarmentVeilQueueUp
+                                     : !QueueOk(veil.renderQueue, GarmentVeilQueue, GarmentVeilQueueUp))
+                        SetQueuePersisted(me, slot, objType, veil, go, Q(GarmentVeilQueue, GarmentVeilQueueUp));
+                    return;
+                }
+                // NEVER create on a load. The garment ghost shipped later than the garment stamp, so a
+                // scene authored on an older build has a stamp and NO ghost - and an automatic pass that
+                // makes one adds a MaterialEditor copy the scene never saved, on every load, to a
+                // character that looked right without it. Correct an existing ghost here; creating one is
+                // the hotkey's to do, exactly as it is for the stamp itself.
+                if (!allowCreate) return;
+                var before = new System.Collections.Generic.List<Material>(r.sharedMaterials);
+                _mCopyRemove.Invoke(me, new object[] { slot, objType, src, go });
+                foreach (var m in r.sharedMaterials)
+                    if (m != null && !before.Contains(m)) { veil = m; break; }
+                if (veil == null)
+                {
+                    LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: garment ghost copy not created for '"
+                        + baseName + "' on '" + r.name + "' (ME MaterialCopyRemove had no effect).");
+                    return;
+                }
+                _mSetShader.Invoke(me, new object[] { slot, objType, veil, BodyVeilShader, go, true });
+                DirectSetShader(veil, go, BodyVeilShader);
+                // RE-RESOLVE BY NAME. Setting a shader through MaterialEditor re-assigns the renderer's
+                // material array, which re-instances every entry - so the reference captured before that
+                // call can be an orphan nothing draws. The writes below still SAVE (ME keys its record by
+                // material NAME), which is why the scene comes back correct while the live material sits
+                // on its shader default: measured, XrayAlpha read 0.500 three seconds after a write of
+                // 0.770, and the saved scene recorded 0.770. Same class as the customMatBody orphan.
+                string veilName = BaseName(veil);
+                foreach (var m2 in r.sharedMaterials)
+                    if (m2 != null && BaseName(m2) == veilName && m2.shader != null && m2.shader.name == BodyVeilShader)
+                    {
+                        if (!ReferenceEquals(m2, veil))
+                            LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: garment ghost '" + veilName
+                                + "' was re-instanced by the shader change (#" + veil.GetInstanceID()
+                                + " -> #" + m2.GetInstanceID() + "); writing to the drawn one.");
+                        veil = m2;
+                        break;
+                    }
+                _mSetFloat.Invoke(me, new object[] { slot, objType, veil, "StencilBody_Plus_1", (float)(stencil + 1), go, true });
+                _mSetFloat.Invoke(me, new object[] { slot, objType, veil, "XrayAlpha", LiquidWobbleMPBPlugin.CfgGarmentVeilAlpha, go, true });
+                // Albedo only. The veil shader's lighting multiplies by `_RampG`, which a garment
+                // material does not carry - the sample comes back black and the ghost paints a black
+                // silhouette over the window (it read as a dark tint at the shipped 0.7).
+                _mSetFloat.Invoke(me, new object[] { slot, objType, veil, "FlatFabric", 1f, go, true });
+                // READ BACK. This is the value that decides whether the ghost paints fabric over the
+                // window - alpha = textureAlpha * (1 - XrayAlpha) - and it is written exactly once, at
+                // create, through MaterialEditor. There is no Material Editor UI in Free-H, so if the
+                // write is silently dropped nothing can show it and the fabric simply reads solid.
+                // LOOK IT UP AGAIN, do not hand over this reference. ME re-assigns the renderer's material
+                // array, so the copy captured above becomes an orphan nothing draws - reading IT reported
+                // 0.500 while Material Editor's panel showed the 0.770 that had actually been written, and
+                // the saved scene recorded 0.770 too. The check earns its place in Free-H, which has no
+                // Material Editor UI: a genuinely dropped write would otherwise show only as solid fabric.
+                LiquidWobbleMPBPlugin.VerifyFloatSoon(r, BaseName(veil), BodyVeilShader, "_XrayAlpha",
+                    LiquidWobbleMPBPlugin.CfgGarmentVeilAlpha, "garment ghost '" + BaseName(veil) + "'");
+                // What the ghost actually has to paint with. The copy is re-shadered from a garment,
+                // so any input the veil shader expects may be absent - and an absent one reads as
+                // black. Print them once per ghost instead of inferring from the screen.
+                Func<Material, string, string> tex = (mm, pn) =>
+                {
+                    if (!mm.HasProperty(pn)) return pn + "=<no prop>";
+                    var tx = mm.GetTexture(pn);
+                    return pn + "=" + (tx == null ? "NULL" : "'" + tx.name + "'(" + tx.GetType().Name + ")");
+                };
+                Func<Material, string, string> col = (mm, pn) =>
+                    mm.HasProperty(pn) ? pn + "=" + mm.GetColor(pn).ToString("F2") : pn + "=<no prop>";
+                LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: garment ghost '" + veil.name + "' inputs - "
+                    + tex(veil, "_MainTex") + "  " + tex(veil, "_ColorMask") + "  " + tex(veil, "_RampG") + "  "
+                    + col(veil, "_Color") + "  " + col(veil, "_Color2") + "  " + col(veil, "_Color3")
+                    + "   | source " + tex(src, "_MainTex") + "  " + col(src, "_Color"));
+                SetQueuePersisted(me, slot, objType, veil, go, Q(GarmentVeilQueue, GarmentVeilQueueUp));
+            }
+            catch (Exception e)
+            { LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: garment ghost failed for '" + baseName + "' on '" + who + "': " + e.Message); }
+        }
+
+        /// <summary>
+        /// Idempotently stamp every WORN (active) torso garment with a BodyReveal copy at the given
+        /// stencil - the womb then x-rays through the clothes, and the out-of-body bleed disappears
+        /// at the stamped pixels (validated in-game by depth-containment testing).
+        /// Mirrors the manual ME recipe: per garment material, Copy Material -> CloXray/BodyReveal
+        /// -> StencilRef. ME persists the copies in the scene/card like the body ones.
+        /// </summary>
+        public static bool EnsureClothesReveal(Component cc, int stencil, bool debug, bool allowCreate)
         {
             // WEARER-ONLY BY DESIGN, now enforced. The sex debug print below exists because a male
             // reaching this path was already suspected: during penetration his cf_j_kokan can sit
@@ -1817,7 +2321,8 @@ namespace LiquidWobbleMPB
                 var me = cc.GetComponent(_ctrlType);
                 if (me == null) return false;
 
-                // objClothes is a FIELD in some game builds and a PROPERTY in others (this install.
+                // objClothes is a FIELD in some game builds and a PROPERTY in others (observed:
+                // property - the field lookup came back null in-game). Try both, any visibility.
                 GameObject[] slots = null;
                 const BindingFlags ANY = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
                 var fC = cc.GetType().GetField("objClothes", ANY);
@@ -1833,13 +2338,13 @@ namespace LiquidWobbleMPB
                     return false;
                 }
 
-                int stamped = 0, updated = 0;
+                int stamped = 0, updated = 0, untouched = 0;
                 if (debug)
                 {
                     LiquidWobbleMPBPlugin._logger?.LogInfo("[clothes] '" + cc.name + "': objClothes.Length=" + slots.Length +
                         " otClothing='" + _otClothing + "' kinds=" + string.Join(",", Array.ConvertAll(ClothesKinds, k => k.ToString())));
-                    // WHO are we stamping? Clothes reveal is wearer-only, so a male reaching this point at
-                    // all is the bug, not the shader. Print the raw sex value beside our verdict.
+                    // WHO is being stamped? Clothes reveal is wearer-only, so a male reaching this point at
+                    // all is the bug, not the shader. Print the raw sex value beside the verdict.
                     string sexRaw = "?";
                     try
                     {
@@ -1875,7 +2380,7 @@ namespace LiquidWobbleMPB
 
                         if (debug) DumpGarmentPairing(r, "BEFORE");
 
-                        // Snapshot the SOURCE materials first (ME appends copies while we work).
+                        // Snapshot the SOURCE materials first (ME appends copies while this runs).
                         var sources = new System.Collections.Generic.List<Material>();
                         foreach (var m in r.sharedMaterials)
                         {
@@ -1894,11 +2399,13 @@ namespace LiquidWobbleMPB
 
                         foreach (var src in sources)
                         {
-                            // ME names copies from the SANITIZED base name: runtime clothes materials are
-                            // instanced ("cf_m_bot_skirt01 (Instance) (Instance)") but the copy is "cf_m_bot_skirt01.MECopy1".
+                            // ME names copies from the SANITIZED base name: runtime clothes materials
+                            // are instanced ("cf_m_bot_skirt01 (Instance) (Instance)") but the copy is
+                            // "cf_m_bot_skirt01.MECopy1" - strip the suffixes before matching.
                             string baseName = src.name;
                             while (baseName.EndsWith(" (Instance)"))
                                 baseName = baseName.Substring(0, baseName.Length - " (Instance)".Length);
+
 
                             // Existing BodyReveal copy for this source? -> just keep the stencil right.
                             Material existing = null;
@@ -1913,12 +2420,31 @@ namespace LiquidWobbleMPB
                                     updated++;
                                 }
                                 ClearStampDepth(me, kind, _otClothing, existing, go);
-                                SetQueuePersisted(me, kind, _otClothing, existing, go, GarmentStampQueue);
+                                // Only when it differs, and either stack is accepted unless this pass is
+                                // upgrading her - the same guard the veil below uses. An existing garment
+                                // carries whatever the scene saved for it, and this runs on every load, so
+                                // an unconditional write persisted a queue the scene never asked for onto
+                                // a garment that was already correct.
+                                if (UpgradeStack ? existing.renderQueue != GarmentStampQueueUp
+                                                 : !QueueOk(existing.renderQueue, GarmentStampQueue, GarmentStampQueueUp))
+                                    SetQueuePersisted(me, kind, _otClothing, existing, go, Q(GarmentStampQueue, GarmentStampQueueUp));
+                                ApplyStampPull(me, kind, _otClothing, existing, src, go, cc.name);
+                                EnsureGarmentVeil(me, kind, _otClothing, r, src, baseName, stencil, go, cc.name, allowCreate);
                                 continue;
                             }
 
-                            // Adopt a leftover unconfigured copy first (e.g. from a run where the name
-                            // matching failed) before asking ME for a new one.
+                            // OPTION C: this garment has no CloXray copy, so the scene never
+                            // recorded it as see-through. Only an explicit hotkey press may create one.
+                            // An automatic pass - scene load, character reload, body swap - leaves it
+                            // alone, which is what makes a deliberately-opaque top stay opaque and stops
+                            // a garment added after the last press from being x-rayed unasked. Old scenes
+                            // are unaffected: MaterialEditor has always persisted these copies, so a
+                            // garment that WAS transparent still arrives with one and takes the branch
+                            // above.
+                            if (!allowCreate) { untouched++; continue; }
+
+                            // Adopt a leftover unconfigured copy first (e.g. from a run where the
+                            // name matching failed) before asking ME for a new one.
                             Material copy = null;
                             foreach (var m in r.sharedMaterials)
                                 if (m != null && m.name.StartsWith(baseName + ".MECopy") &&
@@ -1938,18 +2464,23 @@ namespace LiquidWobbleMPB
                                 continue;
                             }
                             _mSetShader.Invoke(me, new object[] { kind, _otClothing, copy, BodyRevealShader, go, true });
-                            DirectSetShader(copy, go, BodyRevealShader);   // b940: the flip happens NOW; the ME call above is persistence only
+                            DirectSetShader(copy, go, BodyRevealShader);   // the flip happens NOW; the ME call above is persistence only
                             _mSetFloat.Invoke(me, new object[] { kind, _otClothing, copy, "StencilRef", (float)stencil, go, true });
                             ClearStampDepth(me, kind, _otClothing, copy, go);
-                            SetQueuePersisted(me, kind, _otClothing, copy, go, GarmentStampQueue);
+                            SetQueuePersisted(me, kind, _otClothing, copy, go, Q(GarmentStampQueue, GarmentStampQueueUp));
+                            ApplyStampPull(me, kind, _otClothing, copy, src, go, cc.name);
+                            EnsureGarmentVeil(me, kind, _otClothing, r, src, baseName, stencil, go, cc.name, allowCreate);
                             stamped++;
                             if (debug) DumpGarmentPairing(r, "AFTER  copy of '" + baseName + "'");
                         }
                     }
                 }
 
-                if (stamped > 0 || updated > 0 || debug)
-                    LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: clothes x-ray on '" + cc.name + "': " + stamped + " garment material(s) stamped, " + updated + " restenciled (stencil " + stencil + ").");
+                if (stamped > 0 || updated > 0 || untouched > 0 || debug)
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: clothes x-ray on '" + cc.name + "': " + stamped
+                        + " garment material(s) stamped, " + updated + " restenciled, " + untouched
+                        + " left opaque (no saved copy" + (allowCreate ? "" : "; automatic pass never creates")
+                        + ") (stencil " + stencil + ").");
                 return true;
             }
             catch (Exception e)
@@ -1959,8 +2490,11 @@ namespace LiquidWobbleMPB
             }
         }
 
-        // Same stamp for worn ACCESSORIES (jewelry, acc-clothing, skirts built from accessories…).
-        public static bool EnsureAccessoryReveal(Component cc, int stencil, bool debug)
+        // Same stamp for worn ACCESSORIES (jewelry, acc-clothing, skirts built from accessories…) -
+        // in Free-H the character is dressed almost entirely by the card, so anything covering the
+        // belly must carry the reveal stencil too or it occludes the x-ray window. Mirrors
+        // EnsureClothesReveal: one BodyReveal ME copy per source material, per active accessory slot.
+        public static bool EnsureAccessoryReveal(Component cc, int stencil, bool debug, bool allowCreate)
         {
             // WEARER-ONLY BY DESIGN, now enforced. The sex debug print below exists because a male
             // reaching this path was already suspected: during penetration his cf_j_kokan can sit
@@ -2002,18 +2536,28 @@ namespace LiquidWobbleMPB
                     return false;
                 }
 
-                int stamped = 0, updated = 0;
+                int stamped = 0, updated = 0, untouched = 0;
                 for (int slot = 0; slot < slots.Length; slot++)
                 {
                     var go = slots[slot];
                     if (go == null || !go.activeInHierarchy) continue;   // only accessories that are ON
 
-                    // coordinate ('parentKey').
+                    // the accessory's AUTHORITATIVE attach point is stored per-slot in the
+                    // coordinate ('parentKey') - read that too, not just the runtime hierarchy. Hair /
+                    // head accessories carry a head/hair parentKey (e.g. a_n_headside, ct_hairF); those
+                    // can never occlude the belly window, so skip the whole slot regardless of where its
+                    // mesh happens to sit in the transform tree.
                     bool headSlot = IsHeadRegionParent(AccessoryParentKey(cc, slot));
 
                     foreach (var r in go.GetComponentsInChildren<Renderer>(false))
                     {
                         if (r == null || r.sharedMaterials == null) continue;
+                        // never stamp head/face/HAIR accessories - they can't occlude the belly
+                        // x-ray window and stamping them changed the character's hair look (reported).
+                        // Detected by EITHER the coordinate parentKey (headSlot) OR the runtime attach bone.
+                        // Also SELF-HEAL: if a PRIOR build already stamped this hair, remove that copy so
+                        // re-applying the womb restores the original hair look (MaterialCopyRemove on a
+                        // copy material removes it, per ME's toggle semantics).
                         if (headSlot || IsHeadBranchAccessory(r.transform))
                         {
                             foreach (var m in r.sharedMaterials)
@@ -2042,6 +2586,7 @@ namespace LiquidWobbleMPB
                             while (baseName.EndsWith(" (Instance)"))
                                 baseName = baseName.Substring(0, baseName.Length - " (Instance)".Length);
 
+
                             Material existing = null;
                             foreach (var m in r.sharedMaterials)
                                 if (m != null && m.name.StartsWith(baseName + ".MECopy") &&
@@ -2052,12 +2597,14 @@ namespace LiquidWobbleMPB
                                 {
                                     _mSetFloat.Invoke(me, new object[] { slot, _otAccessory, existing, "StencilRef", (float)stencil, go, true });
                                     ClearStampDepth(me, slot, _otAccessory, existing, go);
-                                    SetQueuePersisted(me, slot, _otAccessory, existing, go, GarmentStampQueue);
+                                    SetQueuePersisted(me, slot, _otAccessory, existing, go, Q(GarmentStampQueue, GarmentStampQueueUp));
                                     updated++;
                                 }
+                                EnsureGarmentVeil(me, slot, _otAccessory, r, src, baseName, stencil, go, cc.name, allowCreate);
                                 continue;
                             }
 
+                            if (!allowCreate) { untouched++; continue; }   // automatic passes never create
                             Material copy = null;
                             foreach (var m in r.sharedMaterials)
                                 if (m != null && m.name.StartsWith(baseName + ".MECopy") &&
@@ -2075,17 +2622,18 @@ namespace LiquidWobbleMPB
                                 continue;
                             }
                             _mSetShader.Invoke(me, new object[] { slot, _otAccessory, copy, BodyRevealShader, go, true });
-                            DirectSetShader(copy, go, BodyRevealShader);   // b940: the flip happens NOW; the ME call above is persistence only
+                            DirectSetShader(copy, go, BodyRevealShader);   // the flip happens NOW; the ME call above is persistence only
                             ClearStampDepth(me, slot, _otAccessory, copy, go);
-                            SetQueuePersisted(me, slot, _otAccessory, copy, go, GarmentStampQueue);
+                            SetQueuePersisted(me, slot, _otAccessory, copy, go, Q(GarmentStampQueue, GarmentStampQueueUp));
                             _mSetFloat.Invoke(me, new object[] { slot, _otAccessory, copy, "StencilRef", (float)stencil, go, true });
+                            EnsureGarmentVeil(me, slot, _otAccessory, r, src, baseName, stencil, go, cc.name, allowCreate);
                             stamped++;
                         }
                     }
                 }
 
                 if (stamped > 0 || updated > 0 || debug)
-                    LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: accessory x-ray on '" + cc.name + "': " + stamped + " material(s) stamped, " + updated + " restenciled (stencil " + stencil + ").");
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("MEBridge: accessory x-ray on '" + cc.name + "': " + untouched + " left opaque, " + stamped + " material(s) stamped, " + updated + " restenciled (stencil " + stencil + ").");
                 return true;
             }
             catch (Exception e)
@@ -2095,22 +2643,44 @@ namespace LiquidWobbleMPB
             }
         }
 
-        // The veil must sit at queue 3502 (after the organ, 3500) or it silently does nothing.
-        private static void EnsureVeilQueue(object me, Material veil, GameObject go)
+        // The veil MUST sit after the organ or it silently does nothing (BodyVeilQueue).
+        // Assigning the shader normally adopts its tag queue; if ME kept a different queue (an old
+        // scene pins the pre-2500 stack's value), push it via ME's queue API (persisted) + set it
+        // directly (immediate), and say so. This is what converts an old scene's veil.
+        // The body stencil stamp must draw BEFORE every organ layer. Newly assigned shaders adopt the
+        // tag queue on their own; this exists for the copy adopted from a scene that pins the old one.
+        private static void EnsureStampQueue(object me, Material stamp, GameObject go, string who)
         {
-            if (veil == null || veil.renderQueue == BodyVeilQueue) return;
-            LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: veil copy queue is " + veil.renderQueue + " (want " + BodyVeilQueue + ") — correcting.");
-            SetQueuePersisted(me, veil, go, BodyVeilQueue);
+            if (stamp == null) return;
+            // Accept EITHER stack: a plain load must not drag an upgraded scene back to legacy. The
+            // hotkey moves it deliberately; anything else only repairs a value from neither stack.
+            if (UpgradeStack ? stamp.renderQueue == BodyStampQueueUp
+                             : QueueOk(stamp.renderQueue, BodyStampQueue, BodyStampQueueUp)) return;
+            int want = Q(BodyStampQueue, BodyStampQueueUp);
+            LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: '" + who + "' body stamp queue is " + stamp.renderQueue
+                + " (want " + want + ") - correcting.");
+            SetQueuePersisted(me, stamp, go, want);
         }
 
-        // Push a render queue through ME's queue API (persisted with the scene/card) AND set it directly on
-        // the material (immediate).
+        private static void EnsureVeilQueue(object me, Material veil, GameObject go)
+        {
+            if (veil == null) return;
+            if (UpgradeStack ? veil.renderQueue == BodyVeilQueueUp
+                             : QueueOk(veil.renderQueue, BodyVeilQueue, BodyVeilQueueUp)) return;
+            int want = Q(BodyVeilQueue, BodyVeilQueueUp);
+            LiquidWobbleMPBPlugin._logger?.LogWarning("MEBridge: veil copy queue is " + veil.renderQueue + " (want " + want + ") — correcting.");
+            SetQueuePersisted(me, veil, go, want);
+        }
+
+        // Push a render queue through ME's queue API (persisted with the scene/card) AND set it
+        // directly on the material (immediate). Signature varies across ME versions - args filled by
+        // parameter type; the second int slot is the queue (first is the slot index 0).
         private static void SetQueuePersisted(object me, Material m, GameObject go, int queue)
         {
             SetQueuePersisted(me, 0, _otCharacter, m, go, queue);
         }
 
-        // b929: garment stamp copies live at queue 2501 - ONE step after the body stamp (2500) - so
+        // garment stamp copies live at queue 2501 - ONE step after the body stamp (2500) - so
         // the body's LimbBlock pass has already written bit7 by the time a garment stamp tests it.
         // Same queue would leave the order to Unity's whim and the sleeve-over-hand block would race.
         private static void SetQueuePersisted(object me, int slot, object objType, Material m, GameObject go, int queue)
@@ -2141,27 +2711,30 @@ namespace LiquidWobbleMPB
     }
 
     // Drives the NodesConstraints plugin (Joan6694, GUID com.joan6694.illusionplugins.nodesconstraints) by
-    // reflection.
+    // reflection - soft dependency. Links the male penis FK bones to the female vagina + the womb's penis_target,
+    // the same mechanism BetterPenetration's Studio component uses. NodesConstraints.AddConstraint is idempotent
+    // (skips an existing pair) and persists constraints with the scene via KKAPI ExtendedSave, so one AddConstraint
+    // call is enough for the link to save/load.
     internal static class NodeConstraintBridge
     {
         // ── OLD-SCENE NC PATH MIGRATION ───────────────────────────────────────────────────────────
         // Womb 7.4.0 renamed the item's internal bones to clo_* so they stop colliding with HER bone
-        // names (ABMX indexes by bare name, first-match-wins — ).
+        // names (ABMX indexes by bare name, first-match-wins).
         // NodesConstraints saves a constraint as a PATH relative to the object, so a scene authored
         // against the old womb points at names that no longer exist. NC's loader does this:
         //
-        // val = val.Find(childNode.Attributes["parentPath"].Value);
-        // if (val == null) continue; // <-- constraint SILENTLY DROPPED
+        //     val = val.Find(childNode.Attributes["parentPath"].Value);
+        //     if (val == null) continue;      // <-- constraint SILENTLY DROPPED
         //
-        // so the user's parenting just vanishes, with no error and nothing left to repair afterwards.
+        // so hand-made parenting just vanishes, with no error and nothing left to repair afterwards.
         // The fix therefore has to land BEFORE NC parses: prefix LoadSceneGeneric, rewrite the paths in
         // the XmlNode, and let NC resolve them normally. Once the scene is re-saved it carries the new
-        // path and this never runs for it again — a one-time migration, not a permanent translation
+        // path and this never runs for it again - a one-time migration, not a permanent translation
         // layer.
         //
-        // Deliberately conservative: it only touches a path that (a) belongs to one of OUR wombs and
+        // Deliberately conservative: it only touches a path that (a) belongs to a CloXray womb and
         // (b) does NOT currently resolve. A path that still works is never rewritten, and a path with a
-        // segment we cannot account for — a PRUNED bone, which no longer exists in any form — is left
+        // segment that cannot be accounted for - a PRUNED bone, which no longer exists in any form - is left
         // alone and reported, because half-fixing it would be worse than failing visibly.
         private static bool _migrateInstalled, _migrateAbsentLogged;
         private static int _migrated, _unrecoverable;
@@ -2183,7 +2756,7 @@ namespace LiquidWobbleMPB
         internal static void InstallScenePathMigration()
         {
             if (_migrateInstalled) return;
-            // DO NOT go through Init() here. It latches `_tried` on its first call, and BepInEx loads us
+            // DO NOT go through Init() here. It latches `_tried` on its first call, and BepInEx loads this plugin
             // BEFORE NodesConstraints (verified: LiquidWobbleMPB at chainloader line 158, NC at 170), so
             // calling it from Awake resolved nothing and then poisoned the bridge for the whole session.
             // Resolve independently and keep retrying until NC actually exists.
@@ -2193,7 +2766,7 @@ namespace LiquidWobbleMPB
                 if (found == null)
                 {
                     // Not loaded YET, or not installed at all. Say so once, late, so "no migration" is
-                    // never silent — that silence is exactly what hid this failure the first time.
+                    // never silent - that silence is exactly what hid this failure the first time.
                     if (!_migrateAbsentLogged && Time.realtimeSinceStartup > 25f)
                     {
                         _migrateAbsentLogged = true;
@@ -2225,8 +2798,8 @@ namespace LiquidWobbleMPB
 
         /// <summary>Walk the saved path a level at a time, accepting the stored name or its clo_ form.</summary>
         // The 13 bones womb 7.4.0 DELETED (not renamed). Only a path failing exactly on one of
-        // these is provably a womb path we broke; any other unresolvable path (a missing modded
-        // accessory, a third-party item) is NC's ordinary silent drop and none of our business.
+        // these is provably a womb path broken by the rename; any other unresolvable path (a missing modded
+        // accessory, a third-party item) is NC's ordinary silent drop and out of scope.
         private static readonly System.Collections.Generic.HashSet<string> PrunedWombBones =
             new System.Collections.Generic.HashSet<string> {
                 "cf_d_ana", "cf_j_ana", "cf_s_ana", "cf_j_spine02", "cf_s_spine02",
@@ -2237,7 +2810,7 @@ namespace LiquidWobbleMPB
         {
             failedSegment = null;
             if (root == null || string.IsNullOrEmpty(saved)) return null;
-            if (root.Find(saved) != null) return null;                 // still resolves — leave it alone
+            if (root.Find(saved) != null) return null;                 // still resolves - leave it alone
             var segs = saved.Split('/');
             var outSegs = new string[segs.Length];
             Transform cur = root;
@@ -2264,7 +2837,7 @@ namespace LiquidWobbleMPB
                 Transform root = oci.guideObject.transformTarget;
                 if (root == null) return;
                 // NO component-based ownership test here. At NC load time Studio has created the item but
-                // OUR components are not attached yet, so GetComponentInChildren<WombExpandEffect> was
+                // The CloXray components are not attached yet, so GetComponentInChildren<WombExpandEffect> was
                 // always null and nothing was ever migrated. The test below is inherently safe and needs
                 // no ownership question answered: only a path that CURRENTLY FAILS and whose clo_-walked
                 // form RESOLVES TO A REAL TRANSFORM is ever rewritten. That can only repair a broken link.
@@ -2276,7 +2849,7 @@ namespace LiquidWobbleMPB
                 {
                     // Blame ourselves ONLY when the walk broke exactly on a bone 7.4.0 deleted. The
                     // previous form fired for ANY unresolvable path on ANY object (missing mods,
-                    // changed third-party items) and loudly told the user a womb bone was removed -
+                    // changed third-party items) and loudly reported that a womb bone was removed -
                     // in scenes that sometimes contained no womb at all.
                     if (failedSeg != null && PrunedWombBones.Contains(failedSeg))
                     {
@@ -2326,13 +2899,15 @@ namespace LiquidWobbleMPB
         private static bool _tried;
         private static Type _ncType;
         private static MethodInfo _addConstraint;   // the 10-arg convenience overload
+        private static MethodInfo _removeConstraintAt;   // NodesConstraints.RemoveConstraintAt(int) - used by the aim takeover
         private static FieldInfo _fConstraints;     // NodesConstraints._constraints (List<Constraint>)
         private static FieldInfo _fChildTransform;  // Constraint.childTransform
         private static FieldInfo _fParentTransform; // Constraint.parentTransform
         private static Harmony _ncHarmony;          // patches the NC pairing-change methods (add / enable-disable / delete)
         private static bool _pairingHooksTried;     // install-once guard for the pairing hooks
 
-        // DIAG: dump every existing constraint (parent/child name + world position) so it can read what.
+        // DIAG: dump every existing constraint (parent/child name + world position) to show what was
+        // set up by hand and learn the correct target.
         public static void DumpConstraints(string tag)
         {
             Init();
@@ -2359,7 +2934,10 @@ namespace LiquidWobbleMPB
 
         public static bool Available { get { Init(); return _addConstraint != null && Instance() != null; } }
 
-        // Live constraint count, or -1 if the list can't be read.
+        // Live constraint count, or -1 if the list can't be read. Callers poll this to wait until
+        // NodesConstraints has finished restoring a saved scene / re-binding after a character change:
+        // adding while that list is still filling creates a SECOND copy of a link it is about to restore
+        // (a scene saved with 2 links loaded back as 4).
         public static int ConstraintCount
         {
             get
@@ -2377,7 +2955,10 @@ namespace LiquidWobbleMPB
             }
         }
 
-        // Drops constraints whose parent or child transform has been destroyed.
+        // Drops constraints whose parent or child transform has been destroyed - a character replacement
+        // kills her half of "vagina -> k_f_dan_entry" and leaves the row behind. That row still counts as
+        // "this node already has a constraint", which is what stopped the lost link from ever being
+        // rebuilt. A row with a destroyed endpoint can never drive anything, so removing it loses nothing.
         public static int RemoveDeadConstraints()
         {
             Init();
@@ -2408,8 +2989,6 @@ namespace LiquidWobbleMPB
             }
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("NodeConstraintBridge: dead-constraint sweep failed: " + e.Message); return 0; }
         }
-
-        // Drops constraints that repeat an earlier (parent, child) pair.
         public static Transform ParentOfChild(Transform child)
         {
             if (child == null) return null;
@@ -2482,7 +3061,9 @@ namespace LiquidWobbleMPB
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("NodeConstraintBridge: duplicate sweep failed: " + e.Message); return 0; }
         }
 
-        // Is `child` already the CHILD of any existing constraint?
+        // Is `child` already the CHILD of any existing constraint? Dedup by child (not just the parent/child PAIR
+        // NodesConstraints itself checks), so re-adding can never stack a second link on the same penis bone even
+        // if the parent transform differs. Mirrors how BP keys its dan constraints by childTransform.
         public static bool HasConstraintForChild(Transform child)
         {
             Init();
@@ -2505,7 +3086,9 @@ namespace LiquidWobbleMPB
             return false;
         }
 
-        // Is `node` already wired into any existing constraint.
+        // Is `node` already wired into ANY existing constraint - as the driven CHILD or as a driving PARENT?
+        // The hotkey uses this to NEVER reassign a dan node already targeted by hand (e.g. dan_entry/
+        // dan_end aimed at their own spheres), regardless of which way they wired it.
         public static bool HasConstraintForNode(Transform node)
         {
             Init();
@@ -2529,8 +3112,7 @@ namespace LiquidWobbleMPB
             return false;
         }
 
-        // Resolve the live NodesConstraints plugin by GUID (robust vs a bare type-name scan that could
-        // collide).
+        // Resolve the live NodesConstraints plugin by GUID (robust vs a bare type-name scan that could collide).
         private static object Instance()
         {
             try
@@ -2556,7 +3138,103 @@ namespace LiquidWobbleMPB
             else LiquidWobbleMPBPlugin._logger?.LogInfo("NodeConstraintBridge: hooked NodesConstraints (" + NcGuid + ").");
         }
 
-        // Position-only link: parentTransform drives childTransform.
+        // What currently DRIVES `child`, if anything? Returns the constraint's parentTransform, or null when
+        // no constraint has `child` as its childTransform. Distinct from HasConstraintForNode, which also
+        // answers true when the node is the DRIVER of someone else's constraint.
+        public static Transform DriverOf(Transform child)
+        {
+            Init();
+            var inst = Instance();
+            if (inst == null || child == null) return null;
+            try
+            {
+                if (_fConstraints == null) _fConstraints = _ncType.GetField("_constraints", BF);
+                var list = (_fConstraints != null ? _fConstraints.GetValue(inst) : null) as System.Collections.IList;
+                if (list == null) return null;
+                foreach (var c in list)
+                {
+                    if (c == null) continue;
+                    if (_fChildTransform == null)  _fChildTransform  = c.GetType().GetField("childTransform", BF);
+                    if (_fParentTransform == null) _fParentTransform = c.GetType().GetField("parentTransform", BF);
+                    if (_fChildTransform == null || _fParentTransform == null) return null;
+                    if ((_fChildTransform.GetValue(c) as Transform) == child)
+                        return _fParentTransform.GetValue(c) as Transform;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// The driver of `child` whose name matches `parentName`, or null. A node can carry SEVERAL
+        /// constraints - a scene may deliberately stack cf_J_Vagina_root (which wakes BP) and a hand-made sphere
+        /// (which does the positioning) on the same k_f_dan_entry - so this asks for the one that
+        /// matters instead of taking whichever comes first.
+        public static Transform DriverNamed(Transform child, string parentName)
+        {
+            Init();
+            var inst = Instance();
+            if (inst == null || child == null) return null;
+            try
+            {
+                if (_fConstraints == null) _fConstraints = _ncType.GetField("_constraints", BF);
+                var list = (_fConstraints != null ? _fConstraints.GetValue(inst) : null) as System.Collections.IList;
+                if (list == null) return null;
+                foreach (var c in list)
+                {
+                    if (c == null) continue;
+                    if (_fChildTransform == null)  _fChildTransform  = c.GetType().GetField("childTransform", BF);
+                    if (_fParentTransform == null) _fParentTransform = c.GetType().GetField("parentTransform", BF);
+                    if (_fChildTransform == null || _fParentTransform == null) return null;
+                    if ((_fChildTransform.GetValue(c) as Transform) != child) continue;
+                    var p = _fParentTransform.GetValue(c) as Transform;
+                    if (p != null && p.name == parentName) return p;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // Delete the constraint driving `child`, through NodesConstraints' OWN RemoveConstraintAt so its
+        // bookkeeping (and the pairing hook) run exactly as they do for a GUI delete. NO FALLBACK: if that
+        // method cannot be resolved, log and remove NOTHING, so a takeover never half-happens.
+        public static bool RemoveDriverOf(Transform child)
+        {
+            Init();
+            var inst = Instance();
+            if (inst == null || child == null) return false;
+            try
+            {
+                if (_fConstraints == null) _fConstraints = _ncType.GetField("_constraints", BF);
+                var list = (_fConstraints != null ? _fConstraints.GetValue(inst) : null) as System.Collections.IList;
+                if (list == null) return false;
+                if (_removeConstraintAt == null)
+                    _removeConstraintAt = _ncType.GetMethod("RemoveConstraintAt", BF, null, new[] { typeof(int) }, null);
+                if (_removeConstraintAt == null)
+                {
+                    LiquidWobbleMPBPlugin._logger?.LogError("NodeConstraintBridge: NodesConstraints.RemoveConstraintAt(int) not found - cannot take over the aim on '"
+                        + child.name + "'. Leaving the existing constraint untouched (no fallback).");
+                    return false;
+                }
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var c = list[i];
+                    if (c == null) continue;
+                    if (_fChildTransform == null) _fChildTransform = c.GetType().GetField("childTransform", BF);
+                    if (_fChildTransform == null) return false;
+                    if ((_fChildTransform.GetValue(c) as Transform) != child) continue;
+                    _removeConstraintAt.Invoke(inst, new object[] { i });
+                    return true;
+                }
+            }
+            catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("NodeConstraintBridge: RemoveDriverOf('" + child.name + "') failed: " + e.Message); }
+            return false;
+        }
+
+        // Position-only link: parentTransform drives childTransform. Idempotent (NodesConstraints returns null if
+        // the pair already exists, either direction). Returns true if added OR already present; false on failure.
+        // FAIL-LOUD: a NodesConstraints link only DRIVES if an endpoint resolves to a registered Studio GuideObject
+        // at add time (cached, not re-resolved per frame). If a freshly-added one resolved NEITHER, warn - it
+        // persists and looks added but won't move anything (the silent-fallback case to surface).
         public static bool AddPositionLink(Transform parentTransform, Transform childTransform, string alias)
         {
             Init();
@@ -2569,8 +3247,7 @@ namespace LiquidWobbleMPB
                     true, parentTransform, childTransform, true, Vector3.zero, false, Quaternion.identity, false, Vector3.zero, alias });
                 string pair = "'" + parentTransform.name + "' -> '" + childTransform.name + "'";
                 if (res == null) { LiquidWobbleMPBPlugin._logger?.LogInfo("NodeConstraintBridge: constraint " + pair + " already present."); return true; }
-                // Will it actually DRIVE? A link only moves a bone if an endpoint is a live Studio node
-                // (GuideObject).
+                // Will it actually DRIVE? A link only moves a bone if an endpoint is a live Studio node (GuideObject).
                 bool? gp = GuideObjectBridge.IsGuideObject(parentTransform);
                 bool? gc = GuideObjectBridge.IsGuideObject(childTransform);
                 if (gp == false && gc == false)
@@ -2582,7 +3259,17 @@ namespace LiquidWobbleMPB
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("NodeConstraintBridge: AddConstraint failed (" + parentTransform.name + " -> " + childTransform.name + "): " + e.Message); return false; }
         }
 
-        // ── NC PAIRING HOOKS ────────────────────────────────────────────────────────────────────────────────── Harmony-postfix the THREE NodesConstraints methods that can change a k_f_dan_entry constraint.
+        // ── NC PAIRING HOOKS ──────────────────────────────────────────────────────────────────────────────────
+        // Harmony-postfix the THREE NodesConstraints methods that can change a k_f_dan_entry constraint - AddConstraint
+        // (create; the GUI "Add", scene/XML load, copy, and AddPositionLink all funnel through it), the
+        // SetConstraintEnabled toggle (the GUI checkbox, the "Link" toggle, and the Timeline interpolable all route
+        // through it), and RemoveConstraintAt (delete). Each fires RequestRepair so every womb re-pairs on its next
+        // post-IK frame. THIS is what lets WombExpandEffect run pairing fully event-driven with NO fallback poll: a
+        // seated womb's entry is NC-pinned, so it only moves via these discrete operations + character (re)load (also
+        // wired to RequestRepair). Lazy + install-once + fail-loud per hook: if NodesConstraints renames a method on a
+        // future version it is LOGGED and that one event won't fire instantly (diagnosable, not silently masked by a poll).
+        // Caller-gated to a womb being present (InstallWombHooks). NodesConstraints loads at BepInEx startup, so by the
+        // time a womb/character exists it is resolvable.
         public static void InstallPairingHooks()
         {
             if (_pairingHooksTried) return;
@@ -2592,24 +3279,24 @@ namespace LiquidWobbleMPB
             if (_ncHarmony == null) _ncHarmony = new Harmony("Clo.LiquidWobbleMPB.ncpairing");
             var cstr = _ncType.GetNestedType("Constraint", BindingFlags.NonPublic | BindingFlags.Public);
 
-            // enable/disable toggle: SetConstraintEnabled(Constraint, bool).
+            // enable/disable toggle: SetConstraintEnabled(Constraint, bool)
             var mToggle = (cstr != null) ? _ncType.GetMethod("SetConstraintEnabled", BF, null, new[] { cstr, typeof(bool) }, null) : null;
             PatchOrWarn(mToggle, nameof(OnSetConstraintEnabled), "SetConstraintEnabled (enable/disable)");
 
-            // create: the AddConstraint overload that actually appends to _constraints is the one with the
-            // MOST parameters (the shorter overloads delegate to it); its return value is the new Constraint.
+            // create: the AddConstraint overload that actually appends to _constraints is the one with the MOST
+            // parameters (the shorter overloads delegate to it); its return value is the new Constraint.
             MethodInfo mAdd = null; int maxP = -1;
             foreach (var m in _ncType.GetMethods(BF))
                 if (m.Name == "AddConstraint" && m.GetParameters().Length > maxP) { maxP = m.GetParameters().Length; mAdd = m; }
             PatchOrWarn(mAdd, nameof(OnAddConstraint), "AddConstraint (create)");
 
-            // delete: RemoveConstraintAt(int).
+            // delete: RemoveConstraintAt(int)
             var mDel = _ncType.GetMethod("RemoveConstraintAt", BF, null, new[] { typeof(int) }, null);
             PatchOrWarn(mDel, nameof(OnRemoveConstraint), "RemoveConstraintAt (delete)");
         }
 
-        // Each hook is resolved, patched + logged INDEPENDENTLY (its own try/catch) so one failing target
-        // can't abort the others, and every outcome is logged (fail-loud, no silent give-up).
+        // Each hook is resolved, patched + logged INDEPENDENTLY (its own try/catch) so one failing target can't abort the
+        // others, and every outcome is logged (fail-loud, no silent give-up). The install-once guard above prevents double-patch.
         private static void PatchOrWarn(MethodInfo target, string postfixName, string label)
         {
             if (target == null) { LiquidWobbleMPBPlugin._logger?.LogWarning("NodeConstraintBridge: NC " + label + " method not found (NodesConstraints version changed?) — that pairing change will NOT update instantly."); return; }
@@ -2621,8 +3308,9 @@ namespace LiquidWobbleMPB
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("NodeConstraintBridge: failed to hook NC " + label + " (" + e.Message + ") — that pairing change will NOT update instantly."); }
         }
 
-        // Postfixes. __0 = the Constraint arg (toggle); __result = the new Constraint (add; null if NC
-        // deduped it).
+        // Postfixes. __0 = the Constraint arg (toggle); __result = the new Constraint (add; null if NC deduped it).
+        // Both re-pair only when the touched constraint's child/parent is k_f_dan_entry. Delete can't read the removed
+        // constraint after the fact, so it re-pairs unconditionally (a delete is rare and FindByEntry is cheap + sticky).
         private static void OnSetConstraintEnabled(object __0)  { RepairIfDanEntry(__0); }
         private static void OnAddConstraint(object __result)    { RepairIfDanEntry(__result); }
         private static void OnRemoveConstraint()
@@ -2647,6 +3335,24 @@ namespace LiquidWobbleMPB
     }
 
     // Stops BetterPenetration stacking a DUPLICATE dan constraint on every scene load.
+    //
+    // BP's reload re-add (KK_Studio_BetterPenetration: ReinitializeControllers -> AddDanConstraints, fired ~1s
+    // after load via its resetDelay counter) re-resolves the saved dan-bone parent BY NAME inside the female's
+    // hierarchy (Core_BetterPenetration.BetterPenetrationController.AddDanConstraints -> Tools.GetTransformOfChaControl).
+    // When two same-named studio items (e.g. two spheres) target the dan bones and one is parented under the
+    // female, that by-name lookup matches the WRONG item, so BP adds a second 'X -> k_f_dan_end' link each load
+    // (NodesConstraints dedups only by the full parent+child PAIR, so a mismatched-parent pair is accepted).
+    // BP's "Auto-Target" setting does NOT gate this path - which is why turning Auto-Target Off doesn't stop it.
+    //
+    // ONLY that by-name path is hooked: AddDanConstraints is called with NULL parents on the reload re-add and the
+    // "Enable BP Controller" toggle, but with EXPLICIT parents when Auto-Target re-aims (CheckAutoTarget, which
+    // also removes the old links first). So skip ONLY when both parents are null AND the male's k_f_dan_end is
+    // ALREADY constrained in NodesConstraints (the re-add is then redundant). That leaves Auto-Target re-aiming,
+    // first-time setup, hand-made NC edits, and the hotkey untouched, and is a complete no-op when BP isn't installed.
+    // Signals the exact frame an UncensorSelector body rebuild finishes, via a postfix on its
+    // ReloadCharacterBody (the same method BetterPenetration patches). Armed per character by the
+    // uncensor carry-over; the waiting coroutine keys off Done() instead of polling for bones on a
+    // timer. Install failure is loud and the waiter's cap then reports it - no alternate path.
     internal static class UncBodyReloadWatch
     {
         private const BindingFlags BF = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
@@ -2699,21 +3405,31 @@ namespace LiquidWobbleMPB
                 int id = cc.GetInstanceID();
                 if (_pending.Remove(id)) _done.Add(id);
                 // A body rebuild replaces the material the renderer draws, so the clothing alpha mask
-                // has to be re-pushed onto the new one (b957).
+                // has to be re-pushed onto the new one.
                 BodyMaterialFix.AdoptRenderedBodyMaterial(cc, "after an uncensor body rebuild");
             }
             catch { }
         }
     }
 
-    /// The permanent invisible-torso fix. ME reads materials through renderer.materials - Unity's
-    /// INSTANCING getter, which clones every material on a renderer - and its lookup walks EVERY
-    /// renderer of the character, so one ME call also clones the BODY material. The game keeps
-    /// writing the clothing alpha mask to ChaControl.customMatBody, now an orphan nobody renders:
-    /// undressing clears a mask the screen never sees and the clone keeps the one it was born
-    /// with. ME repairs this for its own copies but only when sharedMaterials.Length > 1, which
-    /// skips a male whose body carries no copies. The cure is adoption: hand customMatBody the
-    /// material that is actually rendered, once - the game then writes straight to the screen.
+    /// BODY ALPHA-MASK SYNC - the permanent transparent-torso fix.
+    ///
+    /// The game keeps the body's clothing alpha mask (and the _alpha_a/_alpha_b body-fade floats) on
+    /// ChaControl.customMatBody, and writes there whenever clothes change. MaterialEditor reads
+    /// materials through MaterialAPI.GetMaterials -> renderer.materials - Unity's INSTANCING getter,
+    /// which CLONES every material on the renderer and assigns the clones back - and its
+    /// GetObjectMaterials runs that across EVERY renderer of the character. So a single ME call for
+    /// the penis x-ray also clones his BODY material: customMatBody becomes an orphan nobody renders,
+    /// the game's later "undressed, clear the mask" writes land on it unseen, and the clone keeps the
+    /// mask it was cloned with - the jacket's, which hides the torso. Permanent: removing the x-ray
+    /// (or the whole plugin) cannot reach the clone; only a full body rebuild would.
+    ///
+    /// ME hits the same problem with its own copies and fixes it in ChangeAlphaMaskPostfix /
+    /// ChangeClothesTopPostfix by pushing customMatBody's values onto rendBody.sharedMaterials - but
+    /// only `if (rendBody.sharedMaterials.Length > 1)`, i.e. only when copies exist. HER body carries
+    /// these copies so ME repairs it; HIS body has a single material, so ME's repair skips exactly the
+    /// case an ME call from here creates. This is ME's repair without that gate, for the characters
+    /// touched. It is a no-op whenever the renderer already holds the game's own material.
     internal static class BodyMaterialFix
     {
         private static Harmony _harmony;
@@ -2721,7 +3437,7 @@ namespace LiquidWobbleMPB
         private static bool _membersMissingLogged;
         private static readonly System.Collections.Generic.HashSet<int> _touched = new System.Collections.Generic.HashSet<int>();
 
-        /// Characters we have run ME calls on — the only ones we repair (never a global side effect).
+        /// Characters ME calls have run on - the only ones repaired (never a global side effect).
         public static void MarkTouched(Component cc)
         {
             if (cc == null) return;
@@ -2730,11 +3446,19 @@ namespace LiquidWobbleMPB
         }
 
 
-        /// One-shot: copy the game's live mask/_alpha_a/_alpha_b onto the rendered clone, then
-        /// re-point ChaControl.customMatBody at it. No polling afterwards; ME's edits on the clone
-        /// survive; no-op when nothing was cloned; loud error (and no change) if the field cannot
-        /// be re-pointed. Clearing the clone's mask instead would leave the torso unmasked under
-        /// clothes, and undress-clone-redress would race the game's own clothes coroutines.
+        /// ADOPTION - the one-shot cure: no polling, nothing of ours left running.
+        ///
+        /// ME's renderer.materials access clones the body material, leaving the game pointing at an
+        /// object nobody renders, so every later clothing-mask write is lost (caught in testing:
+        /// customMatBody id=-75204 vs the rendered id=-100064). Rather than chase those writes for
+        /// ever, hand the game the material that IS on screen: copy its live body state onto the
+        /// clone once, then re-point ChaControl.customMatBody at the clone. From then on the game
+        /// writes straight to what the renderer draws and dressing/undressing work natively.
+        ///
+        /// The alternatives are worse: clearing the clone's mask leaves the torso unmasked under
+        /// clothes (body geometry then renders inside tight garments), and undressing/redressing to
+        /// steal a clean clone races the game's own clothes coroutines. ME's edits on the clone are
+        /// kept - nothing is discarded - and this is a no-op when no cloning happened.
         public static void AdoptRenderedBodyMaterial(Component cc, string why)
         {
             try
@@ -2769,7 +3493,9 @@ namespace LiquidWobbleMPB
 
                 if (!SetMember(cc, "customMatBody", clone))
                 {
-                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: ChaControl.customMatBody could not be re-pointed (no writable field or property) - the game keeps writing the body mask to a material nobody renders, so undressing may leave the torso hidden.");
+                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: ChaControl.customMatBody could not be re-pointed"
+                        + " - the game keeps writing the body mask to a material nobody renders, so undressing may leave"
+                        + " the torso hidden. What is actually there:" + DescribeMember(cc, "customMatBody"));
                     return;
                 }
                 LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: body material handed back to the game on '" + cc.name + "' (" + why
@@ -2789,8 +3515,39 @@ namespace LiquidWobbleMPB
                 if (f != null) { f.SetValue(obj, value); return true; }
                 var p = t.GetProperty(name, BI);
                 if (p != null && p.CanWrite) { p.SetValue(obj, value, null); return true; }
+                // A GET-ONLY property still has storage behind it. Member<T> reads through the getter and
+                // is happy; this used to walk past and report "no writable member", which is how the
+                // re-point could fail on a build where the read plainly worked. An auto-property's store
+                // is the compiler's backing field; a hand-written one commonly uses the _name form.
+                if (p != null)
+                {
+                    var bf = t.GetField("<" + name + ">k__BackingField", BI) ?? t.GetField("_" + name, BI);
+                    if (bf != null && bf.FieldType.IsInstanceOfType(value)) { bf.SetValue(obj, value); return true; }
+                }
             }
             return false;
+        }
+
+        // What EXISTS under this name, and why each candidate was refused. Called only when SetMember has
+        // already failed, so the next log says what the member actually is instead of only that it could
+        // not be written - the difference between one more run and another round of guessing.
+        private static string DescribeMember(object obj, string name)
+        {
+            if (obj == null) return "<null object>";
+            const BindingFlags BI = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var sb = new System.Text.StringBuilder();
+            for (var t = obj.GetType(); t != null; t = t.BaseType)
+            {
+                var f = t.GetField(name, BI);
+                if (f != null) sb.Append(" [").Append(t.Name).Append(".field ").Append(f.FieldType.Name).Append(']');
+                var p = t.GetProperty(name, BI);
+                if (p != null) sb.Append(" [").Append(t.Name).Append(".property ").Append(p.PropertyType.Name)
+                                 .Append(p.CanWrite ? " read-write" : " READ-ONLY")
+                                 .Append(t.GetField("<" + name + ">k__BackingField", BI) != null ? ", auto-backed"
+                                       : t.GetField("_" + name, BI) != null ? ", _-backed" : ", no backing field found")
+                                 .Append(']');
+            }
+            return sb.Length == 0 ? "no member of that name anywhere in the type chain" : sb.ToString();
         }
 
         public static void TryInstall()
@@ -2827,7 +3584,7 @@ namespace LiquidWobbleMPB
 
 
         // customMatBody / rendBody live on ChaInfo, ChaControl's BASE - and either can be a field or a
-        // property depending on game version, so walk the whole chain and accept both (b956 asked
+        // property depending on game version, so walk the whole chain and accept both (a report
         // ChaControl for a field only, found nothing, and the probe never ran).
         private static T Member<T>(object obj, string name) where T : class
         {
@@ -2845,80 +3602,15 @@ namespace LiquidWobbleMPB
 
     }
 
-    internal static class BPDanReaddGuard
+    // Finds BetterPenetration's dan-end marker on a character - the cheapest "does this one have a
+    // penis?" test in the plugin. It was the duplicate-marker guard until BP 5.1 fixed that upstream;
+    // only the lookup is left.
+    internal static class BPDanBones
     {
-        private static bool _stoodDown;
         private const string BpTypeName = "Core_BetterPenetration.BetterPenetrationController";
-        private static bool _applied;
-        private static Harmony _harmony;
 
-        // Idempotent + LAZY. BP's Core_BetterPenetration assembly is loaded only when the first BP character
-        // appears (after every plugin's Awake), so an Awake-time attempt no-ops; it therefore ALSO call this on each CharacterReloaded and actually patch once the type resolves.
-        public static void TryApply()
-        {
-            if (BPBridge.BpHasOwnDanDupGuard)
-            {
-                if (!_stoodDown) { _stoodDown = true; LiquidWobbleMPBPlugin._logger?.LogInfo("BPDanReaddGuard: not installed - this BetterPenetration refuses the duplicate itself (per bone, which also lets it re-bind the female collision agent)."); }
-                return;
-            }
-            if (_applied) return;
-            try
-            {
-                var bpType = AccessTools.TypeByName(BpTypeName);
-                if (bpType == null) return;   // BP not loaded yet — retry on the next CharacterReloaded
-                var m = AccessTools.Method(bpType, "AddDanConstraints");
-                if (m == null)
-                {
-                    _applied = true;          // renamed/removed in this BP version — stop retrying, warn once
-                    LiquidWobbleMPBPlugin._logger?.LogWarning("BPDanReaddGuard: " + BpTypeName + ".AddDanConstraints not found (BP version changed?) — dan-dup guard NOT installed.");
-                    return;
-                }
-                if (_harmony == null) _harmony = new Harmony("Clo.LiquidWobbleMPB.bpdanguard");
-                _harmony.Patch(m, prefix: new HarmonyMethod(typeof(BPDanReaddGuard).GetMethod(nameof(Prefix), BindingFlags.Static | BindingFlags.NonPublic)));
-                _applied = true;
-                LiquidWobbleMPBPlugin._logger?.LogInfo("BPDanReaddGuard: patched " + BpTypeName + ".AddDanConstraints (prevents duplicate dan constraint on load).");
-            }
-            catch (Exception e)
-            {
-                _applied = true;              // don't spin on a hard error — warn once, leave BP as-is
-                LiquidWobbleMPBPlugin._logger?.LogWarning("BPDanReaddGuard: failed to install guard (" + e.Message + ") — BP will behave as before (may re-add a duplicate on load).");
-            }
-        }
-
-        // Return false to SKIP BP's AddDanConstraints. Only for the by-name re-add path (both parents null)
-        // when the male's k_f_dan_end is already constrained.
-        private static bool Prefix(object __instance, Transform danEntryParent, Transform danEndParent)
-        {
-            if (!WombExpandEffect.EffectiveActive) return true;   // mod off or no CloXray womb -> never touch BP's dan re-add
-            // Auto-Target re-aim (and any explicit-target call) passes real parents — never interfere with it.
-            if (danEntryParent != null || danEndParent != null) return true;
-            try
-            {
-                Transform danEnd = ResolveDanEnd(__instance);
-                if (danEnd != null && NodeConstraintBridge.HasConstraintForNode(danEnd))
-                {
-                    LiquidWobbleMPBPlugin._logger?.LogInfo("BPDanReaddGuard: '" + danEnd.name + "' already constrained in NodesConstraints — skipping BP's by-name dan re-add (would duplicate).");
-                    return false;   // skip BP's re-add
-                }
-            }
-            catch (Exception e)
-            {
-                LiquidWobbleMPBPlugin._logger?.LogWarning("BPDanReaddGuard: guard check failed (" + e.Message + ") — letting BP run (may duplicate).");
-            }
-            return true;   // run BP's AddDanConstraints unchanged
-        }
-
-        // This controller's male k_f_dan_end, found under its ChaControl (no reliance on BP internal fields).
-        private static Transform ResolveDanEnd(object controller)
-        {
-            if (controller == null) return null;
-            var ccProp = controller.GetType().GetProperty("ChaControl",
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            var cc = ccProp?.GetValue(controller, null) as Component;
-            return FindDanEnd(cc);
-        }
-
-        // A male's k_f_dan_end (real penis tip), found under its ChaControl.
+        // A male's k_f_dan_end (real penis tip), found under its ChaControl. Shared with the on-load penis-bend
+        // re-assert gate so a deliberately hand-FK-posed penis can be left alone.
         public static Transform FindDanEnd(Component chaControl)
         {
             if (chaControl == null) return null;
@@ -2928,7 +3620,8 @@ namespace LiquidWobbleMPB
         }
     }
 
-    // Reads Studio's GuideObjectManager (Singleton) to tell whether a Transform is a live guide object.
+    // Reads Studio's GuideObjectManager (Singleton) to tell whether a Transform is a live guide object - the
+    // precondition for a NodesConstraints link to actually DRIVE that bone. Reflection (no hard Studio ref).
     internal static class GuideObjectBridge
     {
         private const BindingFlags BF = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
@@ -2983,16 +3676,24 @@ namespace LiquidWobbleMPB
     {
         private static bool _subscribed;
         private const string VaginaBone = "cf_J_Vagina_root";   // BP/uncensor-provided female vagina bone (primary match)
-        private const string FallbackBone = "cf_j_kokan";       // vanilla female crotch bone (lowercase j is intentional — NOT cf_J_Kokan, a different aibu bone); fallback when no character has the BP bone
-        private const float  PenisWombRange = 0.5f;             // a penis is attached to a womb only if its tip (k_f_dan_end) is within this of penis_target — stops a lone male being yanked to a DIFFERENT female's womb (real couple ~0.1m; wrong ~1.2m)
+        private const string FallbackBone = "cf_j_kokan";       // vanilla female crotch bone (lowercase j is intentional - NOT cf_J_Kokan, a different aibu bone); fallback when no character has the BP bone
+        // A penis is attached to a womb only if its tip (k_f_dan_end) is within this of penis_target.
+        // A real couple sits at ~0.1m and a wrong pairing at ~1.2m, so the old 0.5m rejected the obvious
+        // mistake but still claimed any male merely STANDING NEAR her - and the aim link is what drags him
+        // to the womb, so "in range" is not a passive judgement, it moves the scene. 0.15m keeps the real
+        // couple and leaves a bystander alone.
+        private const float  PenisWombRange = 0.15f;
         private const int    HotkeyBuild = 15;                  // bump per plugin build so the log identifies the loaded DLL
 
         public static bool Enabled { get; set; } = true;
         public static bool Debug { get; set; } = false;
         // World-distance within which a womb's entrance counts as "inside this character's vagina".
+        // Baked (the F1 entry was dropped in 1.1). A womb in the vagina sits a few cm from cf_J_Vagina_root; a
+        // separately-spawned character is far -> excluded.
         public static float MaxRange = 0.15f;
 
-        // Subscribe once to KKAPI CharacterApi.CharacterReloaded on every loaded copy.
+        // Subscribe once to KKAPI CharacterApi.CharacterReloaded on EVERY loaded copy (the install
+        // can have more than one KKAPI assembly; subscribing to all + idempotent apply is safe).
         public static void Init()
         {
             if (_subscribed) return;
@@ -3004,25 +3705,40 @@ namespace LiquidWobbleMPB
         }
 
         // EventHandler<CharacterReloadedEventArgs> via relaxed binding (param typed as the base EventArgs).
-        private static bool _bpWaOffLogged;
+        // Install the two BP-interop Harmony patches (dan-dup guard + penis-FK enforcer) once a CloXray womb is
+        // actually present. Both are idempotent (a private _applied guard patches at most once) and BP-lazy (no-op
+        // until BP's assembly loads, then they take). Called from the womb's OnEnable, the scene-load penis-bend
+        // coroutine, and a womb-gated CharacterReloaded - whichever first sees both a womb and BP. Their prefix/postfix
+        // additionally early-out on WombExpandEffect.AnyActive, so removing the last womb makes them inert again.
         internal static void InstallWombHooks()
         {
-            if (LiquidWobbleMPBPlugin.BPWorkaroundsEnabled)
-            {
-                BPDanReaddGuard.TryApply();
-                PenisFKEnforcer.TryApply();
-            }
-            else if (!_bpWaOffLogged)
-            {
-                _bpWaOffLogged = true;
-                LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: BP WORK-AROUNDS DISABLED (test switch) — the dan-duplicate guard and the penis-FK enforcer are NOT installed, so BetterPenetration's own behaviour is exposed. Set LiquidWobbleMPBPlugin.BPWorkaroundsEnabled = true to restore them.");
-            }
+            // Both guards are safe to run alongside a fixed BetterPenetration: the dan guard skips only a
+            // REDUNDANT re-add (whichever side gets there first, the other no-ops) and the FK enforcer acts
+            // only while BP is actively driving.
             NodeConstraintBridge.InstallPairingHooks();   // instant womb<->penis re-pair on any k_f_dan_entry NodesConstraint add/enable/disable/delete
         }
 
-        // A scene LOAD and a character REPLACEMENT both arrive as CharacterReloaded, but they need opposite
-        // handling.
+        // A scene LOAD and a character REPLACEMENT both arrive as CharacterReloaded, but they need
+        // opposite handling: on a load NodesConstraints restores the links the scene was saved with, so
+        // anything added is a second copy of one that is still coming; on a replacement the links are
+        // gone for good and only this rebuilds them. KKAPI's studio save/load API is what tells the
+        // two apart. Without it there is no way to tell, so auto-relinking stays off and the apply hotkey remains
+        // the way to re-aim - a wrong guess here is what doubles constraints.
+        // A scene LOAD and a character REPLACEMENT both arrive as CharacterReloaded and need opposite
+        // handling: on a load NodesConstraints restores the links the scene was saved with, so anything added
+        // here duplicates a link that is still coming; on a replacement they are gone for good and only this
+        // rebuilds them. The window is bracketed by two real events, no wall clock:
+        // SceneCustomFunctionController.OnSceneLoad opens it (KKAPI runs every controller BEFORE raising
+        // the event) and StudioSaveLoadApi.SceneLoad closes it - that event is raised from
+        // SceneLoadComplete, i.e. when the load has FINISHED, which is also why LoadInProgress is already
+        // false by then and is not consulted here.
         private static bool _sceneLoading;
+        // A body reload - a card swap, an uncensor change - leaves BetterPenetration re-binding its
+        // collision agent and NodesConstraints restoring links for a moment. Reads that depend on either
+        // legitimately fail during that window, and the right answer is to wait, not to alarm. Stamped
+        // by OnCharacterReloaded; BP's own re-init runs ~1s after the event, so the window covers it.
+        private static float _bodyReloadUntil;
+        internal static bool BodyReloadSettling { get { return Time.unscaledTime < _bodyReloadUntil; } }
         private static float _sceneLoadOpenedAt;
         private static bool _sceneWatchOk, _sceneWatchTried;
         private const float SceneLoadWatchdog = 30f;   // a load that never completes must not disable re-linking for the session
@@ -3040,7 +3756,7 @@ namespace LiquidWobbleMPB
             { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: could not subscribe to StudioSaveLoadApi.SceneLoad (" + e.Message + ") - a scene load cannot be told from a character replacement, so constraints are NOT re-linked automatically. Use the apply hotkey after a character change."); }
         }
 
-        // Called from WobbleSceneController.OnSceneLoad.
+        // Called from WobbleSceneController.OnSceneLoad - the load has started.
         internal static void MarkSceneLoadStarted()
         {
             _sceneLoading = true;
@@ -3063,7 +3779,11 @@ namespace LiquidWobbleMPB
             }
         }
 
-        // WHICH CHARACTER WEARS THIS WOMB. Studio states the answer outright when the item is parented.
+        // WHICH CHARACTER WEARS THIS WOMB. Studio states the answer outright when the item is parented to
+        // her - either physically (workspace parenting reparents the item under the character) or through
+        // the workspace tree - so ask that first, and only measure distances for a genuinely free-standing
+        // item (every main-game womb, and a Studio item that was never parented). The geometric rung is
+        // what once matched the MALE standing against her and forced a female body onto him.
         internal static Component ResolveWearer(WombExpandEffect w, out string how)
         {
             how = "none";
@@ -3077,6 +3797,39 @@ namespace LiquidWobbleMPB
             return null;
         }
 
+        // Which Studio object OWNS this transform? Answers the only question the aim takeover cares
+        // about: is this one of HER BONES, or is it a placed object?
+        //
+        // ancestry is NOT ownership. A sphere parented to a character in the workspace is a
+        // child of her root, so GetComponentInParent<ChaControl> finds her and calls the sphere "her
+        // bone" - which is how an earlier build stole a hand-made sphere aim. Every Studio object registers its
+        // own guideObject.transformTarget, so the owner is the DEEPEST target the transform sits
+        // under: her bones resolve to her OCIChar, the sphere resolves to its own OCIItem even while
+        // parented to her. Studio types are touched only after the IsStudio guard, matching
+        // WearerFromStudioTree - the method JITs in the main game either way, so the guard has to be
+        // the first thing in it.
+        private static Studio.ObjectCtrlInfo OwningStudioObject(Transform t)
+        {
+            if (!MainGameWomb.IsStudio || t == null) return null;
+            try
+            {
+                var studio = Studio.Studio.Instance;
+                if (studio == null || studio.dicObjectCtrl == null) return null;
+                Studio.ObjectCtrlInfo best = null; int bestDepth = -1;
+                foreach (var kv in studio.dicObjectCtrl)
+                {
+                    var oci = kv.Value;
+                    var tt = (oci != null && oci.guideObject != null) ? oci.guideObject.transformTarget : null;
+                    if (tt == null || !t.IsChildOf(tt)) continue;
+                    int d = 0; for (var p = tt; p != null; p = p.parent) d++;
+                    if (d > bestDepth) { bestDepth = d; best = oci; }
+                }
+                return best;
+            }
+            catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: studio-owner lookup failed for '" + t.name + "': " + e.Message); return null; }
+        }
+
+        // Walks the womb item's workspace node upward to the first character node above it.
         private static Component WearerFromStudioTree(WombExpandEffect w)
         {
             if (!MainGameWomb.IsStudio) return null;
@@ -3104,7 +3857,9 @@ namespace LiquidWobbleMPB
             return null;
         }
 
-        // The womb this character's penis is parked in, or null.
+        // The womb this character's penis is parked in, or null. Tolerant about which marker exists:
+        // right after a body rebuild the BP dan bones can still be missing, so the vanilla crotch bone
+        // counts too. Males only - a female is matched as a WEARER, never as a penetrator.
         private static WombExpandEffect WombPenetratedBy(Component cc)
         {
             if (cc == null || !MainGameWomb.IsMaleChara(cc)) return null;
@@ -3127,8 +3882,8 @@ namespace LiquidWobbleMPB
         }
         private static readonly string[] PenisMarkers = { "k_f_dan_end", "k_f_dan_entry", FallbackBone };
 
-        // The reverse direction: the womb this character wears, decided by the same resolver, so a parented
-        // item can never be claimed by a nearer unrelated womb.
+        // The reverse direction: the womb this character wears, decided by the SAME resolver, so a
+        // parented item can never be claimed by a nearer unrelated womb.
         internal static WombExpandEffect WombOfWearer(Component cc, out string how)
         {
             how = "none";
@@ -3145,35 +3900,55 @@ namespace LiquidWobbleMPB
 
         private static void OnCharacterReloaded(object sender, KKAPI.Chara.CharaReloadEventArgs e)
         {
-            // A (re)load can change the vagina-root list AND the womb<->penis pairing candidates -> refresh
-            // both event-driven.
+            _bodyReloadUntil = Time.unscaledTime + 5f;   // see BodyReloadSettling
+            // A (re)load can change the vagina-root list AND the womb<->penis pairing candidates -> refresh both event-driven.
             WombExpandEffect.InvalidateVaginaRoots();
             WombExpandEffect.RequestRepair();
-            // A womb spawn deferred behind the forced uncensor reload waits.
-            MainGameWomb.NotifyReloadComplete();
-            // The BP-interop hooks are CloXray-womb-scoped: install them only while a womb is in the scene,
-            // so a no-CloXray scene is never patched.
+            // The BP-interop hooks are CloXray-womb-scoped: install them only while a womb is in the scene, so a
+            // no-CloXray scene is never patched. (They also early-out on AnyActive at runtime, so a leftover patch is
+            // inert once the womb is gone.)
             if (WombExpandEffect.AnyActive) InstallWombHooks();
             if (!Enabled) return;
             try
             {
                 var p = e.GetType().GetProperty("ReloadedCharacter");
                 var cc = p != null ? p.GetValue(e, null) as Component : null;
-                // DEFER: run the re-apply after MaterialEditor has restored this body's saved BodyReveal
-                // copy.
+                // DEFER: run the re-apply AFTER MaterialEditor has restored this body's saved BodyReveal copy
+                // (ME's own CharacterReloaded controller has no ordering guarantee against this one). Deferred, the saved copy is ADOPTED,
+                // saved copy (zero stencil writes - the load-reset fix); only a copy that never appears (a genuinely
+                // fresh/swapped-in character) is created. See WobbleSceneController.DeferApply.
                 if (cc != null) WobbleSceneController.DeferApply(cc);
             }
             catch (Exception ex) { LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal.OnCharacterReloaded: " + ex.Message); }
         }
 
         // On character load/change: if a CloXray womb sits IN this character's vagina (entrance within
-        // MaxRange of cf_J_Vagina_root), (re)apply BodyReveal.
+        // MaxRange of cf_J_Vagina_root), (re)apply BodyReveal. Proximity-based, NO in-memory arming - so it
+        // survives a scene save/load: load a scene whose char has a womb in the vagina -> applies; change
+        // that character -> the womb is still in the (new) vagina -> re-applies. A freshly spawned character
+        // lands away from the womb -> not applied (the over-trigger fix).
+        // The actual worker - run DEFERRED (via WobbleSceneController.DeferApply) so it executes after ME restore.
         public static void ApplyForCharacterNow(Component cc)
         {
             if (!LiquidWobbleMPBPlugin.CfgEnabled) return;   // master toggle OFF -> never stamp materials
             if (cc == null) return;
-            // Two anatomy probes: the BP vagina root AND the vanilla crotch bone (excluding any womb item's
-            // own copy).
+            // EVERY Q() below this point resolves against MEBridge.UpgradeStack, and that flag is
+            // only raised while the one-key hotkey runs. So an AUTOMATIC pass - a scene load, a character
+            // reload - read it as false and re-stamped her garments onto the LEGACY queue, undoing the
+            // 2478 that MaterialEditor had just restored correctly, while her body stayed at 2479. The
+            // clothes stopped being see-through and the log called it "0 stamped, 0 restenciled", because
+            // the counters only track stencils and the queue was changed silently.
+            //
+            // Her BODY STAMP is the record of which stack she is on - it is the half MaterialEditor
+            // persists - so read the flag from her instead of from a transient global. The hotkey still
+            // forces it true for the character it is applying to; this only fills it in when nothing has.
+            bool hadUpgrade = MEBridge.UpgradeStack;
+            if (!hadUpgrade) MEBridge.UpgradeStack = MEBridge.StampIsUpgraded(MEBridge.FindBodyStamp(cc));
+            try
+            {
+            // Two anatomy probes: the BP vagina root AND the vanilla crotch bone (excluding any womb item's own
+            // copy). In main-game H the vagina root is NOT pose-animated (idles at the standing position), so the
+            // womb must be allowed to match via whichever probe is closer.
             Transform vagina = FindChild(cc.transform, VaginaBone);
             Transform crotch = FindChild(cc.transform, FallbackBone);
             if (vagina == null && crotch == null) { if (Debug) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: '" + cc.name + "' has neither " + VaginaBone + " nor " + FallbackBone + "; skipping."); return; }
@@ -3190,35 +3965,48 @@ namespace LiquidWobbleMPB
             // which pair the scene used. Match the womb to it BEFORE the pair is read below.
             StudioPairWomb.LoadSync(cc, best);
             int st = best.OrganStencil();
-            // overwriteExisting=false: on LOAD/reload, ensure the reveal exists but never re-stamp an
-            // existing copy's stencil.
+            // overwriteExisting=false: on LOAD/reload, ensure the reveal exists but NEVER re-stamp an existing copy's
+            // stencil - the womb's _StencilBody may not be MaterialEditor-restored yet, so a re-derive would clobber
+            // a saved non-default pair (8/12/16) with the stale default 4. The hotkey (ApplyAll) uses true.
             if (MEBridge.EnsureBodyReveal(cc, st, Debug, false))
                 best.OnBodyRevealApplied();   // restore out-of-body interior+cum (new-spawn default hides them)
             if (LiquidWobbleMPBPlugin.CfgBodyVeil) MEBridge.EnsureBodyVeil(cc, st + 1, Debug, false);
-            if (LiquidWobbleMPBPlugin.CfgClothesReveal) MEBridge.EnsureClothesReveal(cc, st, Debug);
-            if (LiquidWobbleMPBPlugin.CfgClothesReveal && !MainGameWomb.IsStudio) MEBridge.EnsureAccessoryReveal(cc, st, Debug);   // Free-H: accessories dress the card — stamp them too
+            // AUTOMATIC (deferred from CharacterReloaded: scene load, character swap) -> correct what the
+            // scene recorded, create nothing. See the note in EnsureClothesReveal.
+            if (LiquidWobbleMPBPlugin.CfgClothesReveal) MEBridge.EnsureClothesReveal(cc, st, Debug, false);
+            if (LiquidWobbleMPBPlugin.CfgClothesReveal && !MainGameWomb.IsStudio) MEBridge.EnsureAccessoryReveal(cc, st, Debug, false);
             // Bracket the apply: with the AFTER REMOVE audit this says whether a missing bodypart was
-            // already missing before we touched the character, or appeared across our own edit.
+            // already missing before the character was touched, or appeared across the edit.
             MEBridge.AuditGeometry(cc, "AFTER APPLY");
             if (Debug) MEBridge.DumpMaskState(cc, "AFTER APPLY");
 
-            // Studio: a character load or replacement invalidates the penis links (her half of "vagina ->
-            // k_f_dan_entry" dies with her old body), so they have to be re-made.
+            // Studio: a character load or replacement invalidates the penis links (her half of
+            // "vagina -> k_f_dan_entry" dies with her old body), so they have to be re-made. Hand that to
+            // the deferred path - NodesConstraints restores/re-binds its own list on its own schedule, and
+            // linking before it settles duplicates whatever it is about to restore.
+            }
+            finally { if (!hadUpgrade) MEBridge.UpgradeStack = false; }
         }
 
         // The penis links have to be re-made after a character change whatever else happened to that
-        // character.
+        // character - in particular when the material carry-over handles the swap, which returns
+        // "handled" and skips the proximity apply above. So this is called from the deferred path
+        // directly rather than living inside it.
         internal static void StudioRelinkFor(Component cc)
         {
             if (!MainGameWomb.IsStudio || cc == null || !LiquidWobbleMPBPlugin.CfgEnabled || !Enabled) return;
             string how;
             WombExpandEffect best = WombOfWearer(cc, out how);
             if (best != null)
-                // Remember the body this scene runs on every time the wearer is seen with her vagina bones.
+                // Remember the body this scene runs on EVERY time the wearer is seen with her vagina bones -
+                // including during a scene load, which is when a loaded scene's wearer is first seen at all.
                 CaptureWearer(best, cc);
             else
             {
-                // A MALE reload rebuilds his body and with it k_f_dan_entry / k_f_dan_end.
+                // A MALE reload rebuilds his body and with it k_f_dan_entry / k_f_dan_end - the CHILD half
+                // of BOTH penis links - so a boy swap needs the same re-link a girl swap does (and the same
+                // re-derive of his penis x-ray). The re-link is womb-anchored and resolves the wearer on its
+                // own, so all this has to do is pick the womb he is in.
                 best = WombPenetratedBy(cc);
                 if (best == null) return;
                 if (TryRestorePenisUncensor(best, cc)) return;   // reload started; the deferred path re-links
@@ -3233,8 +4021,10 @@ namespace LiquidWobbleMPB
             WobbleSceneController.DeferNodeRelink(best, cc);
         }
 
-        // Records on the womb which body its wearer runs: the had-vagina flag plus her body-uncensor GUID,
-        // so a later replacement can put the same body on the incoming card.
+        // Records on the womb which body its wearer runs: the had-vagina flag plus her body-uncensor
+        // GUID, so a later replacement can put the same body on the incoming card. Called from every
+        // path that sees the wearer intact (reloads including scene loads, the settled re-link, the
+        // apply hotkey). No-op unless the vagina bones are actually present right now.
         internal static void CaptureWearer(WombExpandEffect w, Component cc)
         {
             if (w == null || cc == null || FindChild(cc.transform, VaginaBone) == null) return;
@@ -3248,7 +4038,8 @@ namespace LiquidWobbleMPB
             }
         }
 
-        // Records the MALE's penis/balls uncensor on the womb while he still has BP's dan bones.
+        // Records the MALE's penis/balls uncensor on the womb while he still has BP's dan bones. Called
+        // from every path that has him intact: the penis aim, the constraint poll, the apply hotkey.
         internal static void CapturePenetrator(WombExpandEffect w, Component male)
         {
             if (w == null || male == null || FindChild(male.transform, DanEntryBone) == null) return;
@@ -3263,7 +4054,9 @@ namespace LiquidWobbleMPB
         }
 
         // A replacement male whose card brought no BP penis has no dan bones, so BetterPenetration has
-        // nothing to drive and the womb cannot be penetrated.
+        // nothing to drive and the womb cannot be penetrated. Put back the exact penis uncensor this
+        // scene ran on - carrying the scene's own setup over, not picking one. Once per character; a card
+        // that ALREADY has BP dan bones is left alone. True = a reload was started (caller should stop).
         internal static bool TryRestorePenisUncensor(WombExpandEffect w, Component male)
         {
             if (w == null || male == null) return false;
@@ -3283,7 +4076,12 @@ namespace LiquidWobbleMPB
         private static readonly System.Collections.Generic.HashSet<int> _bpPenisForced = new System.Collections.Generic.HashSet<int>();
         internal const string DanEntryBone = "k_f_dan_entry";
 
-        // Poll-side capture (2s cadence from WobbleSceneController).
+        // Poll-side capture (2s cadence from WobbleSceneController). Reload events cannot do this job on
+        // a scene LOAD: the wearer's reload fires BEFORE her uncensor body applies, so the vagina bones
+        // are not there yet at event time and no later event comes once they are. The constraint list is
+        // the cheap, always-correct source - the restored vagina->entry row names her bone directly.
+        // Stops scanning once every womb has both the flag and the GUID (womb components are recreated
+        // per scene load, so the poll re-arms itself on the next load).
         internal static void CaptureWearersFromConstraints()
         {
             if (!MainGameWomb.IsStudio || !LiquidWobbleMPBPlugin.CfgEnabled || !Enabled) return;
@@ -3310,7 +4108,7 @@ namespace LiquidWobbleMPB
                 if (best != null && bestD <= MaxRange)
                 {
                     CaptureWearer(best, cc);
-                    // The child of this row is k_f_dan_entry - i.e. the MALE.
+                    // The child of this row is k_f_dan_entry - i.e. the MALE - so one row names both halves.
                     var male = pair.Value != null ? FindChaControlOf(pair.Value) : null;
                     if (male != null) CapturePenetrator(best, male);
                 }
@@ -3318,6 +4116,7 @@ namespace LiquidWobbleMPB
         }
 
         // Runs once NodesConstraints has settled (see WobbleSceneController.DeferNodeRelink).
+        // Post-settle entry: find who is wearing the womb NOW (the pre-wait character object is gone).
         internal static void RelinkNearWomb(WombExpandEffect w)
         {
             if (w == null) return;
@@ -3335,8 +4134,10 @@ namespace LiquidWobbleMPB
             if (vagina != null) CaptureWearer(w, cc);
             else if (w.WearerHadBPVagina)
             {
-                // The swapped-in card came in on a body with no cf_J_Vagina bones, so the penis has nothing
-                // to anchor.
+                // The swapped-in card came in on a body with no cf_J_Vagina bones, so the penis has
+                // nothing to anchor to. Put back the exact uncensor the previous wearer had - carrying
+                // the scene's own setup over, not picking one. Once per character: the reload re-enters
+                // here with the bones present. Anything else is left to the Uncensor Selector UI.
                 if (string.IsNullOrEmpty(w.WearerBodyGuid))
                     LiquidWobbleMPBPlugin._logger?.LogError("CloXray: '" + cc.name + "' needs the BP body this scene was built on, but that body's uncensor GUID was never captured - pick it in Uncensor Selector, then press the apply hotkey.");
                 else if (!HasPenetratorFor(w, cc))
@@ -3356,12 +4157,13 @@ namespace LiquidWobbleMPB
             if (dead > 0) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: cleared " + dead + " constraint(s) left pointing at the replaced body.");
             if (w.WearerHadBPVagina && FindChild(cc.transform, VaginaBone) == null)
             {
-                // Her body is still the one without vagina bones (the carry-over above either could not run
-                // or has not finished).
+                // Her body is still the one without vagina bones (the carry-over above either could not
+                // run or has not finished). Linking now would anchor the penis to the vanilla crotch bone,
+                // which is the wrong bone AND leaves a second entry link behind once the real one appears.
                 LiquidWobbleMPBPlugin._logger?.LogError("CloXray: '" + cc.name + "' has no " + VaginaBone + " yet — not re-linking the penis (it would anchor to the crotch bone). Press the apply hotkey once her body has loaded.");
                 return;
             }
-            ApplyPenisForWomb(w, cc);
+            AutoReapply(w, cc);
             int dupes = NodeConstraintBridge.RemoveDuplicatePairs();
             if (dupes > 0) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: cleaned " + dupes + " duplicate constraint(s) after the re-link.");
             WombExpandEffect.RequestRepair();   // re-pair the womb to the penis on the current links
@@ -3378,7 +4180,9 @@ namespace LiquidWobbleMPB
             Vector3 mouth = w.EntranceWorld();
             string wn = w.name;
 
-            // Seated in one of her BetterPenetration orifices?
+            // Seated in one of her BetterPenetration orifices? Only BP's own entry bones qualify: BP reads
+            // the parent bone's name to decide vaginal vs anal, and drives its colliders and pull bones
+            // from that. Plain FindChild is enough - the 7.4.0 womb carries none of these names.
             var seats = new System.Collections.Generic.List<KeyValuePair<float, Transform>>();
             foreach (var nm in BpOrifices)
             {
@@ -3402,7 +4206,7 @@ namespace LiquidWobbleMPB
                 return kv.Value;
             }
 
-            // Anywhere else: the womb's own canal mouth, so the penis enters the womb where it actually.
+            // Anywhere else: the womb's own canal mouth, so the penis enters the womb where it actually is.
             Transform canal = w.CanalEntryBone;
             if (canal != null)
             {
@@ -3419,8 +4223,15 @@ namespace LiquidWobbleMPB
             return null;
         }
 
-        // BP's own entry targets: the vagina and the anus.
-        private static readonly string[] BpOrifices = { VaginaBone, "cf_J_Ana_Root" };
+        // BP's own entry targets: the vagina and the anus. Anchoring at one of these is what makes BP
+        // treat the penetration as vaginal or anal (colliders, and the pull bones that deform her).
+        // From BP's own source: LookTargets.BPAnaTarget = "cf_J_Ana_Root" (a BP-uncensored body's look
+        // target) and BoneNames.AnaTarget = "cf_j_ana" (KK's own anal bone, what BP matches against).
+        // Only the second exists on a KK body - cf_J_Ana_Root was never found in any log from this
+        // game - so without it an anal womb could never seat and fell through to "not in a BP orifice",
+        // then seated on cf_J_Vagina_root instead because the anus is 4.3cm from it and the seat range
+        // is 10cm. Both are listed; seats are sorted by distance, so the nearer one wins.
+        private static readonly string[] BpOrifices = { VaginaBone, "cf_j_ana", "cf_J_Ana_Root" };
         private const float OrificeSeatRange = 0.10f;   // beyond this the womb is not sitting in that orifice
 
         // Is this bone already driving a DIFFERENT penis's entry?
@@ -3431,7 +4242,8 @@ namespace LiquidWobbleMPB
             return false;
         }
 
-        // Is a penetrating penis actually parked in this womb? Gates the uncensor force to real couples.
+        // Is a penetrating penis actually parked in this womb? Gates the uncensor force to real couples -
+        // a display womb with nobody in it never triggers a body change.
         private static bool HasPenetratorFor(WombExpandEffect w, Component receiver)
         {
             return FindPenetratorForWomb(w, receiver) != null;
@@ -3448,11 +4260,15 @@ namespace LiquidWobbleMPB
             return (penetrator != null && end != null && Vector3.Distance(end.position, target.position) <= PenisWombRange) ? penetrator : null;
         }
 
-        // Characters already tried to give a BP body after a replacement.
+        // Characters already given a BP body after a replacement. Cleared as soon as the
+        // character is seen with vagina bones, so a later swap can force again; while set, it stops the
+        // force/reload cycle from repeating on a card that has no BP uncensor available.
         private static readonly System.Collections.Generic.HashSet<int> _bpBodyForced = new System.Collections.Generic.HashSet<int>();
 
-        // Full x-ray stamp of one character for one womb.
-        internal static void StampWombChar(WombExpandEffect w, Component cc)
+        // Full x-ray stamp of one character for one womb. overwriteExisting=true: callers are explicit
+        // actions (the hotkey, or the post-uncensor restore whose body rebuild just destroyed the old
+        // copies) - sync the body/veil stencil to the womb's CURRENT pair.
+        internal static void StampWombChar(WombExpandEffect w, Component cc, bool allowCreate)
         {
             if (w == null || cc == null) return;
             if (Debug) MEBridge.DumpBodyState(cc, "pre-stamp");   // material-state dump: diagnostics only
@@ -3461,33 +4277,36 @@ namespace LiquidWobbleMPB
             if (MEBridge.EnsureBodyReveal(cc, st, true, true))
                 w.OnBodyRevealApplied();   // restore out-of-body interior+cum (new-spawn default hides them)
             if (LiquidWobbleMPBPlugin.CfgBodyVeil) MEBridge.EnsureBodyVeil(cc, st + 1, true, true);
-            if (LiquidWobbleMPBPlugin.CfgClothesReveal) MEBridge.EnsureClothesReveal(cc, st, true);
-            if (LiquidWobbleMPBPlugin.CfgClothesReveal && !MainGameWomb.IsStudio) MEBridge.EnsureAccessoryReveal(cc, st, true);   // Free-H: accessories dress the card - stamp them too
-            // b937: the vanishing-garment report happens right after the HOTKEY, and this path never
+            if (LiquidWobbleMPBPlugin.CfgClothesReveal) MEBridge.EnsureClothesReveal(cc, st, true, allowCreate);
+            if (LiquidWobbleMPBPlugin.CfgClothesReveal && !MainGameWomb.IsStudio) MEBridge.EnsureAccessoryReveal(cc, st, true, allowCreate);   // Free-H: accessories dress the card - stamp them too
+            // the vanishing-garment report happens right after the HOTKEY, and this path never
             // audited - only the load path did. The audit now also detects the invisible-pairing case.
             MEBridge.AuditGeometry(cc, "AFTER HOTKEY APPLY");
         }
 
         internal static bool HasVaginaBone(Component cc) { return cc != null && FindChild(cc.transform, VaginaBone) != null; }
 
-        // Re-entry after the body-uncensor carry-over. The uncensor rebuild runs inside UncensorSelector's.
+        // Re-entry after the body-uncensor carry-over. The uncensor rebuild runs inside UncensorSelector's
+        // own coroutine, NOT through ChaControl.Reload, so no KKAPI reload event follows it - this is the
+        // only path that re-stamps the x-ray (the rebuild destroyed the old body's material copies) and
+        // re-makes the penis links on the restored body.
         internal static void PostUncensorApply(WombExpandEffect w, Component cc)
         {
             if (w == null || cc == null || !LiquidWobbleMPBPlugin.CfgEnabled) return;
             if (SceneLoading) { LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: a scene load started during the uncensor restore - leaving it to the load."); return; }
             LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: '" + cc.name + "' body reloaded with the scene's uncensor - re-stamping the x-ray and re-making the penis links.");
-            StampWombChar(w, cc);
+            StampWombChar(w, cc, false);   // body reloaded underneath - not a request to stamp new garments
             int dead = NodeConstraintBridge.RemoveDeadConstraints();
             if (dead > 0) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: cleared " + dead + " constraint(s) left pointing at the replaced body.");
-            ApplyPenisForWomb(w, cc);
+            AutoReapply(w, cc);
             int dupes = NodeConstraintBridge.RemoveDuplicatePairs();
             if (dupes > 0) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: cleaned " + dupes + " duplicate constraint(s) after the re-link.");
             WombExpandEffect.RequestRepair();   // re-pair the womb to the penis on the current links
             WobbleSceneController.DeferBpRebind(w, cc);   // BP cleared her collision agent on the body reload - re-bind once BP settles
         }
 
-        // Manual hotkey: apply now to every character that has a womb within MaxRange of its vagina (covers
-        // the initial placement, where no reload event fires).
+        // Manual hotkey: apply now to every character that has a womb within MaxRange of its vagina
+        // (covers the initial placement, where no reload event fires).
         public static void ApplyAll()
         {
             if (!LiquidWobbleMPBPlugin.CfgEnabled) return;   // master toggle OFF -> hotkey does nothing
@@ -3496,8 +4315,10 @@ namespace LiquidWobbleMPB
             LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: manual apply — " + wombs.Length + " womb(s), MaxRange=" + MaxRange.ToString("F3") + "m.");
             if (wombs.Length == 0) { LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: manual apply - no CloXray wombs in scene."); return; }
             if (Debug) NodeConstraintBridge.DumpConstraints("constraints BEFORE apply");
-            // NEAREST first. A penis can only be claimed once (the constraint guard refuses a second claim
-            // on the same k_f_dan_end), so with several wombs in a scene the one processed first wins.
+            // NEAREST FIRST. A penis can only be claimed once (the constraint guard refuses a second
+            // claim on the same k_f_dan_end), so with several wombs in a scene the one processed first
+            // wins - and the object scan order is arbitrary. Ordering by how close each womb's aim bone
+            // is to its nearest penis makes the closest womb claim it and the rest fall through.
             var scan = UnityEngine.Object.FindObjectsOfType<Transform>();
             var order = new System.Collections.Generic.List<KeyValuePair<float, WombExpandEffect>>();
             foreach (var w0 in wombs)
@@ -3521,18 +4342,19 @@ namespace LiquidWobbleMPB
                 if (cc != null)
                 {
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "' is worn by '" + cc.name + "' (" + howW + ").");
-                    StampWombChar(w, cc);
+                    StampWombChar(w, cc, true);   // hotkey
                 }
                 else LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: manual apply - womb '" + w.name + "' has no wearer (not parented to a character, and no " + VaginaBone + "/" + FallbackBone + " within " + MaxRange.ToString("F2") + "m).");
                 // AUTO penis: x-ray + aim the PENETRATOR (the OTHER character that has a penis) at THIS womb. No
                 // selection needed, so it can't grab the receiver's own penis or duplicate across both partners.
+                SyncWombStack(w, cc, false);
                 ApplyPenisForWomb(w, cc, true);   // hotkey = an explicit request to wire this pair up
             }
             WombExpandEffect.RequestRepair();   // the hotkey may have added/aimed NC links -> re-pair every womb to its penis now
         }
 
         // Distance from this womb's aim bone to the nearest penis that could claim it (its own wearer
-        // excluded).
+        // excluded). float.MaxValue when there is none.
         private static float NearestPenisDistance(WombExpandEffect w, Transform[] scan)
         {
             if (w == null) return float.MaxValue;
@@ -3545,13 +4367,20 @@ namespace LiquidWobbleMPB
             return (pen != null && end != null) ? Vector3.Distance(end.position, target.position) : float.MaxValue;
         }
 
-        // MAIN-GAME direct path: the womb was spawned ON a known character, so skip the proximity search
-        // entirely.
+        // MAIN-GAME direct path: the womb was spawned ON a known character, so skip the proximity
+        // search entirely (H characters carry a second, un-animated proxy skeleton whose bones sit at
+        // the standing pose - proximity matching against bone names is unreliable there). Stamps the
+        // full stack on the given wearer and x-rays the penetrating male, same as the Studio hotkey.
+        // Mirror of ApplyForWomb, for the main game's womb toggle: the womb is going away, so the
+        // x-ray it justified goes with it. Without this the penis keeps its OrgInside copy and stays
+        // visible through her body after the womb is gone. Studio is deliberately excluded - there the
+        // edits live in the scene and are the author's to keep.
         public static void RemoveForWomb(Component receiver)
         {
             if (MainGameWomb.IsStudio || receiver == null) return;
             MEBridge.RemoveXrayCopies(receiver, Debug);
-            // Her partner's penis copy only goes if no other womb is left in the scene.
+            // Her partner's penis copy only goes if no other womb is left in the scene - with a second
+            // couple still set up he may be that womb's penetrator too.
             if (MainGameWomb.AnySpawned()) return;
             Component male = MainGameWomb.FindNearestMaleWithPenis(receiver.transform.position, 2f, receiver);
             if (male != null) MEBridge.RemoveXrayCopies(male, Debug);
@@ -3560,51 +4389,69 @@ namespace LiquidWobbleMPB
         public static void ApplyForWomb(WombExpandEffect w, Component cc)
         {
             if (!LiquidWobbleMPBPlugin.CfgEnabled || w == null || cc == null) return;
+            // FREE-H IS ALWAYS ON THE SUB-2500 STACK. The opt-in exists for Studio only: a Studio scene
+            // persists render queues through Material Editor, so moving the shipped default would leave
+            // every saved scene half-converted. The main game has no scene file carrying them, so there
+            // is nothing to protect - and no reason to leave the in-window penis unshaded there.
+            bool freeH = !MainGameWomb.IsStudio;
+            if (freeH) MEBridge.UpgradeStack = true;
+            try
+            {
             int st = w.OrganStencil();
             LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: direct apply — womb '" + w.name + "' on '" + cc.name + "' stencil=" + st + ".");
-            BodyMaterialFix.MarkTouched(cc);   // b957: her body materials get cloned by ME too - keep her mask following the game
+            BodyMaterialFix.MarkTouched(cc);   // her body materials get cloned by ME too - keep her mask following the game
             if (MEBridge.EnsureBodyReveal(cc, st, Debug, true))
                 w.OnBodyRevealApplied();   // restore out-of-body interior+cum (new-spawn default hides them)
             if (LiquidWobbleMPBPlugin.CfgBodyVeil) MEBridge.EnsureBodyVeil(cc, st + 1, Debug, true);
-            if (LiquidWobbleMPBPlugin.CfgClothesReveal) MEBridge.EnsureClothesReveal(cc, st, Debug);
-            if (LiquidWobbleMPBPlugin.CfgClothesReveal && !MainGameWomb.IsStudio) MEBridge.EnsureAccessoryReveal(cc, st, Debug);
+            // A womb was spawned or apply was pressed - creating is exactly what was asked for.
+            if (LiquidWobbleMPBPlugin.CfgClothesReveal) MEBridge.EnsureClothesReveal(cc, st, Debug, true);
+            if (LiquidWobbleMPBPlugin.CfgClothesReveal && !MainGameWomb.IsStudio) MEBridge.EnsureAccessoryReveal(cc, st, Debug, true);
             if (MainGameWomb.IsStudio)
             {
-                ApplyPenisForWomb(w, cc);
+                AutoReapply(w, cc);
             }
             else
             {
-                // MAIN GAME: BP's k_f_dan_end marker does NOT track the visible penis there (it idles ~0.7m
-                // off even mid-insertion), so the Studio marker-distance gate always rejects.
+                // MAIN GAME: BP's k_f_dan_end marker does NOT track the visible penis there (it idles
+                // ~0.7m off even mid-insertion), so the Studio marker-distance gate always rejects.
+                // The H male IS the penetrator - convert his penis directly, no marker, no aiming (BP
+                // aims natively in the main game).
                 Component male = MainGameWomb.FindNearestMaleWithPenis(w.transform.position, 2f, cc);
                 if (male != null)
                 {
-                    // b957: our ME calls make ME clone his materials (renderer.materials), which orphans
+                    // these ME calls make ME clone his materials (renderer.materials), which orphans
                     // the game's body material - register him so the clothing alpha mask keeps
                     // following the game, and repair right away in case he is already undressed.
                     BodyMaterialFix.MarkTouched(male);
                     MEBridge.EnsurePenisOrgInside(male, st, Debug, LiquidWobbleMPBPlugin.CfgHPenisOutside,
                                                   LiquidWobbleMPBPlugin.CfgHPenisBottomWindow ? 1f : 0f);
-                    MEBridge.EnsureBallsStamp(male, st, Debug);   // b934: occluder stamp - balls block the window like a hand, plain geometry everywhere
+                    MEBridge.EnsureBallsStamp(male, st, Debug);   // occluder stamp - balls block the window like a hand, plain geometry everywhere
                     BodyMaterialFix.AdoptRenderedBodyMaterial(male, "right after our apply");
-                    KPlugBridge.ReassertDickMaterials(male);          // our copies shift the indices KPlug addresses by
+                    KPlugBridge.ReassertDickMaterials(male);          // the CloXray copies shift the indices KPlug addresses by
                     // KPlug INSTALLED, not KPlug currently-owning. Core.useCustomDick only turns true the
-                    // first time KPlug configures a dick, and on some setups our apply runs BEFORE that -
+                    // first time KPlug configures a dick, and on some setups this apply runs BEFORE that -
                     // a reporter's log showed the bridge bound and hooked but zero captures, so nothing was
                     // ever restored and he got the raw interaction. Capturing early is harmless: it is
                     // first-write-wins and the restore only fires if KPlug later rewrites the materials.
                     if (KPlugBridge.Present)
                         MEBridge.CapturePenisLook(male, Debug);
                     MainGameWomb.AttachPenisAim(w, male, cc);   // pin BP's inner limit at the womb's penis_target
+                    SyncWombStack(w, cc, false);   // the womb item's own materials follow whichever stack she is on
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: main-game penis x-ray on '" + male.name + "' (stencil " + st + ").");
-                    if (Debug) MEBridge.DumpXrayChain(male, cc, w);   // b511: KK-vs-KKS chain diff (penis invisible in KKS womb)
+                    if (Debug) MEBridge.DumpXrayChain(male, cc, w);   // KK-vs-KKS chain diff (penis invisible in KKS womb)
                 }
                 else LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: no male with a penis material within 2m of the womb — penis not x-rayed.");
             }
+            // Everything this character will draw has now been written, so the stack is complete and
+            // can be checked as a whole. Inside the try, before the flag is restored - the assertion
+            // reads material queues, not the flag, so it sees what the frame will actually do.
+            MEBridge.AssertStackOrder(cc, w, "hotkey apply");
+            }
+            finally { if (freeH) MEBridge.UpgradeStack = false; }
         }
 
-        // Re-apply ONLY the penis x-ray copies for a given womb+male (b512): a body reload (the BP5
-        // uncensor force, or a user uncensor/outfit change) destroys the penis renderer's instanced
+        // Re-apply ONLY the penis x-ray copies for a given womb+male: a body reload (the BP5
+        // uncensor force, or an uncensor/outfit change) destroys the penis renderer's instanced
         // .MECopy x-ray materials, so BP drives the new penis correctly but it renders INVISIBLE in
         // the womb (KKS: the default penis uncensor isn't BP, so the force ALWAYS reloads -> the
         // penis was always invisible there). Called from the pin's agent watchdog, which already
@@ -3619,8 +4466,8 @@ namespace LiquidWobbleMPB
             // definition, which carries a stock shader - a reporter's KKUTS penis came back as
             // Shader Forge/main_skin, and a KKUTS-authored material on the stock shader renders WHITE.
             // MaterialEditor has no handler for this partial reload (its re-apply hooks are KKAPI-level),
-            // so nothing restores it. Same defect we fixed for her body; the penis lives under
-            // ObjectType.Character too, so the same body/face re-apply covers it. Before our copies,
+            // so nothing restores it. Same defect as on her body; the penis lives under
+            // ObjectType.Character too, so the same body/face re-apply covers it. Before these copies,
             // so ours are stamped onto the restored material rather than the stock one.
             // ...unless KPlug owns his dick. Its shader and the _MainTex OFFSET that goes with it are one
             // package; restoring only the shader leaves KKUTS sampling at KPlug's ball offset (0, 0.5),
@@ -3639,14 +4486,16 @@ namespace LiquidWobbleMPB
             int st = w.OrganStencil();
             MEBridge.EnsurePenisOrgInside(male, st, Debug, LiquidWobbleMPBPlugin.CfgHPenisOutside,
                                           LiquidWobbleMPBPlugin.CfgHPenisBottomWindow ? 1f : 0f);
-            MEBridge.EnsureBallsStamp(male, st, Debug);   // b934: occluder stamp - balls block the window like a hand, plain geometry everywhere
-            KPlugBridge.ReassertDickMaterials(male);          // our copies shift the indices KPlug addresses by
+            MEBridge.EnsureBallsStamp(male, st, Debug);   // occluder stamp - balls block the window like a hand, plain geometry everywhere
+            KPlugBridge.ReassertDickMaterials(male);          // the CloXray copies shift the indices KPlug addresses by
             LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: penis x-ray RE-APPLIED on '" + male.name + "' after a body reload (stencil " + st + ") — the reload wiped the instanced copies.");
             if (Debug) MEBridge.DumpXrayChain(male, null, w);
         }
 
         // Same story for HER body. The BP5 body-uncensor force reloads the body mesh, which wipes the
-        // instanced cf_m_body .MECopy x-ray materials.
+        // instanced cf_m_body .MECopy x-ray materials - so the window closes, and because a Free-H womb
+        // is hidden out-of-body it disappears with it. That is the "the first hotkey press did nothing"
+        // report: the press worked, then the forced reload undid it. Idempotent, same as the penis.
         public static void ReapplyMainGameBodyXray(WombExpandEffect w, Component female)
         {
             if (w == null || female == null || MainGameWomb.IsStudio) return;
@@ -3658,13 +4507,28 @@ namespace LiquidWobbleMPB
             if (LiquidWobbleMPBPlugin.CfgBodyVeil) MEBridge.EnsureBodyVeil(female, st + 1, Debug, true);
             if (LiquidWobbleMPBPlugin.CfgClothesReveal)
             {
-                MEBridge.EnsureClothesReveal(female, st, Debug);
-                MEBridge.EnsureAccessoryReveal(female, st, Debug);
+                // Free-H re-apply after her body was rebuilt: reproduce what she had, so creating is
+                // correct here - the copies were lost with the old mesh, not deliberately removed.
+                MEBridge.EnsureClothesReveal(female, st, Debug, true);
+                MEBridge.EnsureAccessoryReveal(female, st, Debug, true);
             }
             LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: body x-ray RE-APPLIED on '" + female.name
                 + "' after a body reload (stencil " + st + ") — the reload wiped the instanced copies.");
+            // This method is where the mix came from: it rewrote the garment queues with UpgradeStack
+            // false while her body and the womb were upgraded. Check the whole stack right after it.
+            MEBridge.AssertStackOrder(female, w, "Free-H re-apply after a body reload");
+            // The womb goes invisible about half a second AFTER a successful hotkey press, and this is the
+            // only thing that runs in between. This re-apply repairs HER (body, veil, clothes, accessories)
+            // but never touches the womb item's own materials - the hotkey path calls SyncWombStack, this
+            // one does not. Dump the chain here so the womb's queues and _StencilBody at THIS instant can
+            // be compared against the hotkey's, which settles whether the womb's own materials moved or
+            // whether the window closed on her side.
+            if (Debug) MEBridge.DumpXrayChain(null, female, w);
         }
 
+        // Attach the wobble driver to ONE item's CloXray/Liquid renderer. Used by the selected-item hotkey
+        // AND by the scene-load re-attach (WobbleSceneController). Idempotent: skips if the item already has
+        // one or has no CloXray/Liquid mesh.
         public static void AttachWobbleTo(GameObject go)
         {
             if (go == null || go.GetComponentInChildren<LiquidWobbleMPBEffect>(true) != null) return;
@@ -3681,7 +4545,8 @@ namespace LiquidWobbleMPB
             }
         }
 
-        // Hotkey path: attach the wobble to the SELECTED Studio item(s) only.
+        // Hotkey path: attach the wobble to the SELECTED Studio item(s) only - no scene-wide scan. The
+        // attachment persists with the scene via WobbleSceneController (KKAPI ExtensibleSave).
         public static void AttachLiquidWobbleSelected()
         {
             try
@@ -3693,55 +4558,338 @@ namespace LiquidWobbleMPB
             catch (System.Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: selected-wobble attach failed (Studio/KKAPI?): " + e.Message); }
         }
 
-        // For ONE womb: x-ray the PENETRATOR's penis and aim it at this womb.
+        // For ONE womb: x-ray the PENETRATOR's penis and aim it at this womb. Penetrator = the nearest character
+        // (OTHER than the womb's owner `receiver`) that carries a real penis (cm_m_dankon) - fully automatic, no
+        // selection, so it can't grab the receiver's OWN penis (both partners may be cm_m_dankon) or duplicate. The
+        // penis -> CloXray/OrgInside (stencil matched to this womb) + two position NodesConstraints: k_f_dan_entry ->
+        // the receiver's vagina, k_f_dan_end -> THIS womb's penis_target. Idempotent (dedup by child) + scene-persistent.
+        // The womb ITEM's own materials carry their queue baked into the zipmod, and no Material Editor
+        // record - so they cannot be upgraded the way a character copy is. They are DERIVED instead:
+        // whichever stack HER body stamp is on, the womb follows. Her stamp queue is persisted by ME, so
+        // the marker survives a save, and this runs after ME's restore (the apply is deferred for exactly
+        // that reason), which is what makes reading it safe.
+        // Direct writes, no ME: these are CloXray's own item materials, never a hand edit.
+        // ── THE WOMB ITEM'S SAVED STATE ───────────────────────────────────────────────────────────
+        // A womb carries two pieces of state that are NOT MaterialEditor's: which stencil pair it is on
+        // and which render-queue stack it follows. Both were written straight onto the live
+        // materials and never saved, so every scene load reverted the item to its shipped default
+        // (_StencilBody 4 / pair 1, and the queue tags baked into the shaders). Couples already on pair 1
+        // survived that by luck; a couple moved to pair 2 came back with her body on 8 and her womb on 4,
+        // and the penis vanished from the window. Found 2026-08-27 on a crowded scene, where it hit
+        // exactly one womb - the only one not on pair 1.
+        //
+        // It is stored in CloXray's own scene data (WobbleSceneController), not through ME: ME's item
+        // controller is not reachable by a stable type name across its builds, and this is CloXray's state
+        // rather than a material edit.
+        internal static int WombQueueFor(string shaderName, bool upgraded)
+        {
+            switch (shaderName)
+            {
+                case "CloXray/Organ":     return upgraded ? 2482 : 3500;
+                case "CloXray/OrgInside": return upgraded ? 2484 : 3502;
+                case "CloXray/Liquid":    return upgraded ? 2485 : 3503;
+            }
+            return -1;
+        }
+
+        /// Read back what a womb is currently on, so it can be saved. stencil = -1 when it carries none.
+        internal static void ReadWombState(WombExpandEffect w, out int stencil, out bool upgraded)
+        {
+            stencil = -1; upgraded = false;
+            if (w == null) return;
+            foreach (var r in w.GetComponentsInChildren<Renderer>(true))
+            {
+                if (r == null || r.sharedMaterials == null) continue;
+                foreach (var m in r.sharedMaterials)
+                {
+                    if (m == null || m.shader == null) continue;
+                    if (stencil < 0 && m.HasProperty("_StencilBody")
+                        && (m.shader.name == "CloXray/Organ" || m.shader.name == "CloXray/OrgInside"))
+                        stencil = Mathf.RoundToInt(m.GetFloat("_StencilBody"));
+                    int qUp = WombQueueFor(m.shader.name, true);
+                    if (qUp > 0 && m.renderQueue == qUp) upgraded = true;
+                }
+            }
+        }
+
+        // CloXray_Organ and CloXray_OrgInside both declare _StencilBody = 4, so a womb sitting on 4 is a
+        // womb nothing has spoken for. Any other value came from somewhere - MaterialEditor restoring what
+        // the scene saved, or an earlier hotkey - and is an answer, not an absence.
+        internal const int ShippedStencilBody = 4;
+
+        /// Put a womb on a pair and a stack. Writes only what differs, so a correct womb costs nothing.
+        /// Mirrors the two call sites it replaced: stencil on INSTANCE materials (ME's sliders point at
+        /// those), queues on the shared ones.
+        internal static int ApplyWombState(WombExpandEffect w, int stencil, bool upgraded)
+        {
+            return ApplyWombState(w, stencil, upgraded, false);
+        }
+
+        /// adoptOnly is the LOAD path for a scene that carries no record of its own. Whatever that scene
+        /// already determined IS the answer and may not be overwritten. Two things determine it, and
+        /// neither of them is nothing: MaterialEditor persists the womb's _StencilBody per material and
+        /// restores it before this runs, and the queues come back on the tags baked into the shaders. So
+        /// this writes ONLY where a material is still on its SHIPPED default - which is exactly the case
+        /// the repair was written for, a womb that really did come back on pair 1 while she is on
+        /// another - and it writes no queue at all.
+        ///
+        /// The queues are left alone deliberately. The legacy runtime layout is 3500/3502/3503, one step
+        /// up from the shipped tags 3500/3501/3502, so that the womb's own OrgInside clears the slot the
+        /// penis carve inherits (PenisCarveQueue 3501 IS the OrgInside tag - a copy carries it with no
+        /// record of its own). That step-off has always been the hotkey's job. Doing it during a load
+        /// re-stacks a scene that was authored, tuned and saved without it, which changes how it looks
+        /// for a reason its author never asked for.
+        internal static int ApplyWombState(WombExpandEffect w, int stencil, bool upgraded, bool adoptOnly)
+        {
+            if (w == null) return 0;
+            int changed = 0, kept = 0;
+            var seen = LiquidWobbleMPBPlugin.CfgDebugLog ? new System.Text.StringBuilder() : null;
+            foreach (var r in w.GetComponentsInChildren<Renderer>(true))
+            {
+                if (r == null || r.sharedMaterials == null) continue;
+                // What the scene handed over, before anything here touches it. Printed for every womb
+                // material this method can write, so a value that would have been re-derived is visible
+                // beside the one that was actually restored.
+                if (seen != null)
+                    foreach (var sm in r.sharedMaterials)
+                    {
+                        if (sm == null || sm.shader == null || WombQueueFor(sm.shader.name, false) < 0) continue;
+                        seen.Append("\n    ").Append(MEBridge.BaseName(sm))
+                            .Append(" [").Append(sm.shader.name).Append("]  queue=").Append(sm.renderQueue)
+                            .Append(sm.HasProperty("_StencilBody")
+                                    ? "  stencil=" + Mathf.RoundToInt(sm.GetFloat("_StencilBody")).ToString() : "");
+                    }
+                bool relevant = false;
+                foreach (var sm in r.sharedMaterials)
+                    if (sm != null && sm.shader != null
+                        && (sm.shader.name == "CloXray/Organ" || sm.shader.name == "CloXray/OrgInside")) { relevant = true; break; }
+                if (stencil >= 0 && relevant)
+                {
+                    foreach (var m in r.materials)
+                    {
+                        if (m == null || m.shader == null) continue;
+                        if (m.shader.name != "CloXray/Organ" && m.shader.name != "CloXray/OrgInside") continue;
+                        if (!m.HasProperty("_StencilBody")) continue;
+                        int live = Mathf.RoundToInt(m.GetFloat("_StencilBody"));
+                        // The scene spoke for this material. Leave the whole trio alone - _Plus_1 and
+                        // _ProtectRef belong to the same choice, and rewriting them would split the pair.
+                        if (adoptOnly && live != ShippedStencilBody) { kept++; continue; }
+                        bool moved = live != stencil;
+                        if (moved) { m.SetFloat("_StencilBody", stencil); changed++; }
+                        // The companions follow the pair only when the pair actually moved. They can be
+                        // authored on their own, so writing them into a material that was already right
+                        // is the same overwrite in a smaller place - and it made "wrote 0" untrue. The
+                        // hotkey (adoptOnly false) still restates the whole trio, which is its job.
+                        if (moved || !adoptOnly)
+                        {
+                            if (m.HasProperty("_StencilBody_Plus_1")) m.SetFloat("_StencilBody_Plus_1", stencil + 1);
+                            if (m.HasProperty("_ProtectRef"))         m.SetFloat("_ProtectRef", 32 + stencil + 1);
+                        }
+                    }
+                }
+                foreach (var m in r.sharedMaterials)
+                {
+                    if (m == null || m.shader == null) continue;
+                    int want = WombQueueFor(m.shader.name, upgraded);
+                    if (want < 0 || m.renderQueue == want) continue;
+                    if (adoptOnly)
+                    {
+                        // A CROSS-STACK MIX is the only queue fault worth correcting on its own. The two
+                        // stacks are all-or-nothing: a womb sitting on the sub-2500 numbers while she is
+                        // on the 3500s (or the reverse) makes a layer draw on the wrong side of her body
+                        // stamp and vanish, and nobody chose that. ANY OTHER number was chosen - a scene
+                        // can carry a different queue per womb, deliberately, so that several overlapping
+                        // wombs layer the way its author wanted (measured: 3503/3504, 3504/3505,
+                        // 3502/3507 across three wombs of one scene). Flattening those to the canonical
+                        // set is what changed a scene that had been right for months.
+                        if (m.renderQueue != WombQueueFor(m.shader.name, !upgraded)) continue;
+                        LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "' material '"
+                            + MEBridge.BaseName(m) + "' sits on the " + (upgraded ? "legacy" : "upgraded")
+                            + " stack at " + m.renderQueue + " while she is on the other one - that mix hides a"
+                            + " layer, so it moves to " + want + ".");
+                    }
+                    m.renderQueue = want; changed++;
+                }
+            }
+            if (seen != null && seen.Length > 0)
+                LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: SAVED-STATE '" + w.name + "' as the scene restored it"
+                    + (adoptOnly ? " (no record of ours - adopting)" : "") + ":" + seen
+                    + "\n    -> kept " + kept + ", wrote " + changed
+                    + (adoptOnly ? "; queues left as the scene had them." : "."));
+            return changed;
+        }
+
+        /// automatic = anything no key was pressed for: a character replacement that settled, an
+        /// uncensor body reload, the deferred re-apply after a load. Those run on a scene nobody is
+        /// editing, so they follow the same rule the load path does - correct a cross-stack MIX, which
+        /// hides a layer and nobody chose, and leave every other queue alone. The hotkey still normalises,
+        /// because pressing it IS the request to re-stack.
+        private static void SyncWombStack(WombExpandEffect w, Component receiver, bool automatic)
+        {
+            if (w == null || receiver == null) return;
+            var stamp = MEBridge.FindBodyStamp(receiver);
+            if (stamp == null) return;                       // no x-ray on her yet - nothing to follow
+            bool up = MEBridge.StampIsUpgraded(stamp);
+            int moved = ApplyWombState(w, -1, up, automatic);   // -1 = queues only; the pair is StudioPairWomb's to set
+            if (moved > 0)
+                LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "' -> "
+                    + (up ? "UPGRADED" : "legacy") + " stack (" + moved + " material(s)), following '" + receiver.name + "'.");
+        }
+
+        // The AUTOMATIC re-apply, for a womb that already exists: a character replacement that has
+        // settled, an uncensor body reload that has finished, and a Studio womb spawn.
+        // NOT a scene load - that runs ApplyForCharacterNow instead and never reaches here.
+        // Nor the hotkey: ApplyAll calls SyncWombStack and ApplyPenisForWomb directly.
+        private static void AutoReapply(WombExpandEffect w, Component cc)
+        {
+            SyncWombStack(w, cc, true);   // no key was pressed: fix a cross-stack mix, touch nothing else
+            ApplyPenisForWomb(w, cc);
+        }
+
+
+        // The Studio object for this character, or null. Same dicObjectCtrl walk as the wearer
+        // lookup, matched on charInfo rather than on the workspace tree.
+        private static Studio.OCIChar OciCharFor(Component cc)
+        {
+            if (!MainGameWomb.IsStudio || cc == null) return null;
+            try
+            {
+                var studio = Studio.Studio.Instance;
+                if (studio == null || studio.dicObjectCtrl == null) return null;
+                foreach (var kv in studio.dicObjectCtrl)
+                {
+                    var och = kv.Value as Studio.OCIChar;
+                    if (och != null && ReferenceEquals(och.charInfo, cc)) return och;
+                }
+            }
+            catch (Exception e)
+            { LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: Studio object lookup failed for '" + cc.name + "': " + e.Message); }
+            return null;
+        }
+
+        // Studio hides the penis by default and an x-ray of a hidden penis shows nothing, so applying
+        // a womb to this pair turns it on - the same call the character menu's toggle makes. Only in
+        // Studio: the main game decides this itself. No fallback: an unresolvable Studio object is
+        // reported and nothing is changed.
+        private static void EnsurePenisVisible(Component male)
+        {
+            if (!MainGameWomb.IsStudio || male == null) return;
+            var oci = OciCharFor(male);
+            if (oci == null)
+            {
+                LiquidWobbleMPBPlugin._logger?.LogError("CloXray: no Studio object for '" + male.name
+                    + "' - the penis was not unhidden. Toggle it in the character menu.");
+                return;
+            }
+            if (oci.oiCharInfo != null && oci.oiCharInfo.visibleSon)
+            {
+                if (Debug) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: penis already visible on '" + male.name + "'.");
+                return;
+            }
+            oci.SetVisibleSon(true);
+            LiquidWobbleMPBPlugin._logger?.LogMessage("CloXray: unhid the penis on '" + male.name + "'.");
+        }
+
         private static void ApplyPenisForWomb(WombExpandEffect w, Component receiver, bool manual = false)
         {
+            // the same fault fixed for garments, on the path that fix does NOT reach. This is
+            // called through AutoReapply, not ApplyForCharacterNow, so UpgradeStack was still false here
+            // on any automatic pass - and EnsurePenisOrgInside PERSISTS Q(PenisCarveQueue, ...) at 3501
+            // legacy, dragging the penis copies off the stack the womb is on. The penis then vanishes,
+            // not at load but whenever a deferred re-pair happens to run: "after some time the penis
+            // disappeared". Her body stamp is the record of the stack, so read it from her.
+            bool hadUpgrade = MEBridge.UpgradeStack;
+            if (!hadUpgrade && receiver != null)
+                MEBridge.UpgradeStack = MEBridge.StampIsUpgraded(MEBridge.FindBodyStamp(receiver));
             try
             {
                 Transform target = FindChild(w.transform, "penis_target");
                 if (target == null) { LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "' has no penis_target bone."); return; }
                 var all = UnityEngine.Object.FindObjectsOfType<Transform>();
                 Component penetrator;
-                Transform end = NearestPenisEnd(all, target.position, receiver, out penetrator, target);   // the OTHER character's penis, if unclaimed
+                Transform end = NearestPenisEnd(all, target.position, receiver, out penetrator, target, w.EntranceWorld());   // the OTHER character's penis, if unclaimed
                 if (penetrator == null || end == null)
                 {
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': no penetrator (a cm_m_dankon character other than the receiver) found.");
+                    if (PenisTakeover) PenisNote = "no penis found near her";
                     return;
                 }
-                // Is that nearest penis actually IN this womb? With one male and several
-                // females-each-with-a-womb, every womb finds the same lone male.
+                // Is that nearest penis actually IN this womb? With one male and several females-each-with-a-womb,
+                // every womb finds the SAME lone male - only the womb he's really in should claim him, else he gets
+                // dragged to a far female's vagina. Real couple ~0.1m; a male across the room ~1.2m.
                 float penisDist = Vector3.Distance(end.position, target.position);
+                // Kept unmodified for the on-screen note: penisDist is zeroed below when a pair is
+                // adopted rather than measured, and the note has to say what was actually seen.
+                float penisGap = penisDist;
                 // The aim constraint is what HOLDS the penis at the womb, so its own marker springs back
-                // once the links are deleted.
+                // once the links are deleted - measuring that distance to decide whether to re-create them
+                // is circular. Two explicit signals override it: BetterPenetration already has this penis
+                // bound to this womb's wearer, or the apply hotkey was pressed for this pair.
                 bool bpSaysThisPair = receiver != null &&
                     (UnityEngine.Object)BPBridge.CollisionCharacterOf(penetrator) == (UnityEngine.Object)receiver;
-                if (penisDist > PenisWombRange && (bpSaysThisPair || manual) && !NodeConstraintBridge.HasConstraintForNode(end))
+
+                // ALREADY OURS. If THIS womb's penis_target is what holds his tip, the pairing question was
+                // answered earlier, here. Distance says nothing: the aim link is what puts the penis
+                // at the womb, so measuring it to decide whether to keep the link is circular, and a tip
+                // that has drifted (a pose change, a scaled penis) reads as "someone else's" and gets
+                // dropped. Another womb's penis can never reach this point - NearestPenisEnd refuses to
+                // return one - so this only ever re-adopts a pair already made here.
+                if (penisDist > PenisWombRange && NodeConstraintBridge.ParentOfChild(end) == target)
                 {
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': '" + penetrator.name + "' is "
-                        + penisDist.ToString("F2") + "m from penis_target, but " + (bpSaysThisPair
-                            ? "BetterPenetration has him bound to '" + receiver.name + "'"
-                            : "the apply hotkey was pressed for this womb")
-                        + " - aiming him at it (the aim link is what brings the penis to the womb).");
+                        + penisDist.ToString("F2") + "m from penis_target but THIS womb already holds his tip - keeping the pair.");
+                    penisDist = 0f;
+                }
+                // A LONE penis, explicitly asked for. The old guard also required the tip to carry NO
+                // constraint at all, so a penis held by a leftover or hand-made link could never be claimed
+                // however deliberate the request - the takeover path exists precisely to take those.
+                if (penisDist > PenisWombRange && (bpSaysThisPair || manual || PenisTakeover))
+                {
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': '" + penetrator.name + "' is "
+                        + penisDist.ToString("F2") + "m from penis_target, but BetterPenetration has him bound to '"
+                        + (receiver != null ? receiver.name : "?")
+                        + "' - aiming him at it (the aim link is what brings the penis to the womb).");
                     penisDist = 0f;
                 }
                 if (penisDist > PenisWombRange)
                 {
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': nearest penis ('" + penetrator.name + "') is " + penisDist.ToString("F2") + "m from penis_target (> " + PenisWombRange.ToString("F2") + "m) -> that male is in a DIFFERENT womb; skipping penis x-ray + aiming for this one.");
+                    if (PenisTakeover) PenisNote = "penis SKIPPED - nearest ('" + penetrator.name + "') is " + penisDist.ToString("F2") + "m away, another womb's";
                     return;
                 }
+                // The couple is settled (nearest, in range, not another womb's). If the tip is driven by
+                // something the USER set up - their own sphere, an animation rig, any hand-made link -
+                // LEAVE IT. That aim is deliberate and deleting it would silently break the animation
+                // they built; the hotkey used to release it, which is what this replaces. Everything
+                // else still applies: shaders, stencil pair, window. The link creation further down
+                // already refuses to reassign a node that carries a constraint, so not releasing is the
+                // whole of the change: a competing aim is simply never created.
+                Transform tipHolder = NodeConstraintBridge.ParentOfChild(end);
+                bool aimLeftToUser = tipHolder != null && tipHolder != target && tipHolder.name != "penis_target";
+                if (aimLeftToUser)
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: '" + penetrator.name + "' tip is aimed at '"
+                        + tipHolder.name + "' by a constraint of yours - applying shaders only, the aim is left alone.");
                 CapturePenetrator(w, penetrator);   // remember his penis uncensor for a later male replacement
                 Transform entry  = FindChild(penetrator.transform, DanEntryBone);
                 Transform vagina = EntryAnchorFor(w, receiver, entry);
                 int st = w.OrganStencil();
                 LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "' -> receiver='" + (receiver != null ? receiver.name : "none") + "' penetrator='" + penetrator.name + "' vagina=" + (vagina != null ? "'" + vagina.name + "'" : "NONE") + " stencil=" + st + ".");
+                // Say WHY he was taken. Claiming a penis moves the scene - the aim link drags him to the
+                // womb - so the gap that decided it belongs on screen, not only in the log.
+                string howClaimed = penisGap <= PenisWombRange
+                    ? "claimed at " + (penisGap * 100f).ToString("F0") + "cm"
+                    : "adopted, already this womb's";
+                if (PenisTakeover) PenisNote = aimLeftToUser
+                    ? "penis targets '" + tipHolder.name + "' - only shaders applied (" + howClaimed + ")"
+                    : "penis x-rayed on '" + penetrator.name + "' (" + howClaimed + ")";
                 if (Debug)
                 {
-                    // POSITION READOUT: is penis_target actually AT the womb?
+                    // POSITION READOUT: is penis_target actually AT the womb? target<->entrance small = good.
                     Vector3 ewp = w.EntranceWorld();
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal:   POS penis_target=" + target.position.ToString("F2") + " wombEntrance=" + ewp.ToString("F2") + " (target<->entrance=" + Vector3.Distance(target.position, ewp).ToString("F2") + "m)  penisEnd=" + end.position.ToString("F2") + " (end<->target=" + Vector3.Distance(end.position, target.position).ToString("F2") + "m)" + (vagina != null ? "  vagina=" + vagina.position.ToString("F2") : ""));
                 }
-                // penis_target is BAKED at the womb's tube centre in the mod -> the plugin just constrains
-                // the penis.
+                // penis_target is BAKED at the womb's tube centre in the mod -> the plugin just constrains the penis
+                // to it. A childCount>0 bone is the OLD load-bearing penis_target (stale womb build) -> warn loud.
                 if (target.childCount > 0)
                     LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: penis_target has " + target.childCount + " child bone(s) -> OLD load-bearing bone; rebuild the womb with the centred leaf aim bone.");
                 else if (Debug)
@@ -3751,39 +4899,158 @@ namespace LiquidWobbleMPB
                         LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal:   penis_target offCentre=" + ((target.position - tfoot).magnitude * 1000f).ToString("F1") + "mm from tube centre.");
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal:   GUIDE-OBJ? penis_target=" + GuideObjectBridge.IsGuideObject(target) + " vagina=" + (vagina != null ? GuideObjectBridge.IsGuideObject(vagina) : null) + " k_f_dan_entry=" + (entry != null ? GuideObjectBridge.IsGuideObject(entry) : null) + " k_f_dan_end=" + GuideObjectBridge.IsGuideObject(end) + "  (blank = couldn't read)");
                 }
+                // HOTKEY ONLY, and only for a male. Revealing a hidden penis CHANGES the scene,
+                // so it needs an explicit action - nothing is added on load that was not saved in the
+                // scene. On the automatic path this fired for every womb: NearestPenisEnd can settle on
+                // a female, whose body carries a hidden dan mesh of its own, so loading a scene of wombs
+                // and women with no male in it gave the women penises. A futa whose penis is already
+                // visible is unaffected either way (the call is a no-op then).
+                if (manual)
+                {
+                    if (MainGameWomb.IsMaleChara(penetrator)) EnsurePenisVisible(penetrator);   // a hidden penis cannot show through the window
+                    else LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: '" + penetrator.name
+                        + "' is not a male character - its penis visibility is left exactly as the scene saved it.");
+                }
                 MEBridge.EnsurePenisOrgInside(penetrator, st, true);   // x-ray the penetrator's penis, matched to THIS womb
                 MainGameWomb.DumpBPDanOptions(penetrator);             // log this male's BP DanOptions (harvest for the Free-H override)
                 if (NodeConstraintBridge.Available)
                 {
+                    // NEVER reassign a dan node already targeted by hand (wired EITHER direction - e.g. aimed at a hand-made sphere).
                     if (entry != null && vagina != null)
                     {
                         if (NodeConstraintBridge.HasConstraintForNode(entry)) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: k_f_dan_entry already has a constraint -> leaving your target, not reassigning.");
                         else NodeConstraintBridge.AddPositionLink(vagina, entry, "");   // empty alias -> shows raw "parent -> child" like a manual one
                     }
-                    if (NodeConstraintBridge.HasConstraintForNode(end)) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: k_f_dan_end already has a constraint -> leaving your target, not reassigning.");
-                    else NodeConstraintBridge.AddPositionLink(target, end, "");
+                    // AIM TAKEOVER (2026-08-26). A dan_end already constrained to one of HER BONES is an
+                    // auto-aim - the game's, BP's, or a leftover - and the womb is a better target for it, so it is
+                    // claimed. A dan_end constrained to an ITEM is a hand-made sphere-aim and is NEVER touched.
+                    // That single distinction is the rule; everything else here is just reporting which way it went.
+                    Transform driver = NodeConstraintBridge.DriverOf(end);
+                    if (driver == null)
+                    {
+                        if (NodeConstraintBridge.HasConstraintForNode(end))
+                            LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: k_f_dan_end drives someone else's constraint -> leaving it alone.");
+                        else
+                            NodeConstraintBridge.AddPositionLink(target, end, "");
+                    }
+                    else if (driver == target)
+                    {
+                        LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: k_f_dan_end is already aimed at this womb's penis_target.");
+                    }
+                    else
+                    {
+                        // OWNERSHIP, not ancestry - see OwningStudioObject. A sphere parented to her is
+                        // still the sphere's, and stays hand-owned.
+                        var ownerOci = OwningStudioObject(driver);
+                        var ownerChar = ownerOci as Studio.OCIChar;
+                        Component ownerCc = (ownerChar != null) ? ownerChar.charInfo : null;
+                        bool herBone = ownerCc != null && IsFemale(ownerCc);
+                        if (!herBone)
+                        {
+                            string what = ownerOci == null ? "something Studio does not own"
+                                        : ownerCc != null ? "a male's bone"
+                                        : "'" + (ownerOci.treeNodeObject != null ? ownerOci.treeNodeObject.textName : ownerOci.GetType().Name) + "' - your own object";
+                            LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: k_f_dan_end is aimed at '" + driver.name
+                                + "' (" + what + ") -> leaving your target, not reassigning.");
+                        }
+                        else if (NodeConstraintBridge.RemoveDriverOf(end))
+                        {
+                            NodeConstraintBridge.AddPositionLink(target, end, "");
+                            LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: TOOK OVER the aim on k_f_dan_end - was '" + driver.name
+                                + "', a bone of '" + ownerCc.name + "' (her own rig = an auto-aim), now this womb's penis_target.");
+                        }
+                    }
                 }
                 else LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: NodesConstraints not present -> penis x-rayed but not aimed.");
             }
             catch (System.Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: penis-for-womb failed on '" + (w != null ? w.name : "?") + "': " + e.Message); }
+            finally { if (!hadUpgrade) MEBridge.UpgradeStack = false; }
         }
 
-        // Nearest k_f_dan_end under a ChaControl that carries a cm_m_dankon penis, OTHER than `exclude` (the
-        // receiver).
-        private static Transform NearestPenisEnd(Transform[] all, Vector3 pos, Component exclude, out Component owner, Transform myTarget = null)
+        // Nearest k_f_dan_end under a ChaControl that carries a cm_m_dankon penis, OTHER than `exclude` (the receiver).
+        // `myTarget` is the asking womb's aim bone: a penis whose tip is already constrained to a
+        // DIFFERENT womb belongs to that womb, so it is skipped and the search moves to the next nearest.
+        // Without this, a second womb finds the first womb's penis, sees it taken and gives up instead of
+        // looking further - which is why a second couple in the same scene never wired up.
+        // Set only for the one-key Studio setup (Ctrl+Shift+W): that key promises a finished scene, so
+        // a penis held by a FOREIGN constraint is taken over instead of skipped. A penis held by
+        // another womb's penis_target is still off limits - that would break the other couple.
+        // What the last one-key press did to the penis, for the on-screen line. Set here because only
+        // this layer knows which character was picked and why one was not.
+        internal static string PenisNote;
+        internal static bool   PenisUpgraded;
+
+        internal static bool PenisTakeover;
+
+        // REJECTION LOG (Diagnostic log only). Every k_f_dan_end this womb considered and why it lost.
+        // A crowded scene reported "no penetrator found" for three wombs after a scene LOAD that had
+        // paired fine on the hotkey press, and the reasons were invisible - which is what made it a
+        // guess. Nothing here changes a decision; it only says out loud which one was taken.
+        private static Transform NearestPenisEnd(Transform[] all, Vector3 pos, Component exclude, out Component owner, Transform myTarget = null, Vector3? mouth = null)
         {
             Transform best = null; float bsq = float.MaxValue; owner = null;
+            var dbg = (Debug && myTarget != null) ? new System.Text.StringBuilder() : null;
+            if (dbg != null)
+            {
+                dbg.Append("AutoBodyReveal: PENIS CANDIDATES for penis_target#").Append(myTarget.GetInstanceID())
+                   .Append(" of '").Append(myTarget.root != null ? myTarget.root.name : "?").Append("':")
+                   .AppendLine().Append("   target@").Append(pos.ToString("F2"));
+                if (mouth.HasValue) dbg.Append("  canalMouth@").Append(mouth.Value.ToString("F2"))
+                                       .Append("  (they are ").Append(((mouth.Value - pos).magnitude * 1000f).ToString("F0")).Append("mm apart)");
+                // toMouth is the honest "is he in HER" measure; toTarget is what selection actually uses.
+                dbg.Append("   [toTarget = what CHOOSES; toMouth = distance to her canal mouth]");
+            }
             foreach (var t in all)
             {
                 if (t == null || t.name != "k_f_dan_end") continue;
                 Component cc = FindChaControlOf(t);
-                if (cc == null || cc == exclude || !MEBridge.HasPenisMaterial(cc)) continue;
+                string who = cc != null ? cc.name : "?";
+                if (cc == null) { if (dbg != null) dbg.AppendLine().Append("   REJECT (no ChaControl above it)"); continue; }
+                if (cc == exclude) { if (dbg != null) dbg.AppendLine().Append("   ").Append(who).Append(": REJECT - is the receiver herself"); continue; }
+                if (!MEBridge.HasPenisMaterial(cc)) { if (dbg != null) dbg.AppendLine().Append("   ").Append(who).Append(": REJECT - no cm_m_dankon material"); continue; }
+                float dist = (t.position - pos).magnitude;
+                string dists = "toTarget=" + (dist * 1000f).ToString("F0") + "mm"
+                             + (mouth.HasValue ? "  toMouth=" + ((t.position - mouth.Value).magnitude * 1000f).ToString("F0") + "mm" : "")
+                             + "  end@" + t.position.ToString("F2");
                 if (myTarget != null)
                 {
                     Transform holder = NodeConstraintBridge.ParentOfChild(t);
-                    if (holder != null && holder != myTarget) continue;   // another womb already owns this penis
+                    if (dbg != null)
+                        dbg.AppendLine().Append("   ").Append(who).Append(": ").Append(dists).Append("  heldBy=")
+                           .Append(holder == null ? "nothing" : holder.name + "#" + holder.GetInstanceID()
+                                   + (holder == myTarget ? " (MINE)" : " (foreign)"));
+                    if (holder != null && holder != myTarget)
+                    {
+                        // WHOSE penis this is, and WHETHER TO RE-AIM it, are different questions, and
+                        // only the second one cares who holds the tip. Another womb's aim target owning
+                        // it answers the first: he is already that womb's, never take him. Any OTHER
+                        // holder - a hand-made constraint, a leftover from an old setup - says nothing
+                        // about ownership, and rejecting on it left an ordinarily penetrating couple
+                        // unshaded: BP's own `cf_J_Vagina_root -> k_f_dan_entry` names her while a
+                        // hand-made `cf_j_spine02 -> k_f_dan_end` holds the tip, which is a perfectly
+                        // normal scene.
+                        //
+                        // Nothing here re-aims anything. A hand-made aim is safe because the link is never
+                        // CREATED over one (`aimLeftToUser` below applies shaders only) - not because
+                        // the penis was refused, which only meant no shaders either.
+                        bool anotherWombOwnsIt = holder.name == "penis_target";
+                        if (anotherWombOwnsIt)
+                        {
+                            if (dbg != null) dbg.Append("  -> REJECT: another womb's penis_target owns it");
+                            continue;
+                        }
+                        if (dbg != null) dbg.Append("  -> foreign holder, but not another womb's - his shaders are ours, his aim is not");
+                        if (dbg != null) dbg.Append("  -> taking over the foreign link (hotkey)");
+                    }
                 }
+                else if (dbg != null) dbg.AppendLine().Append("   ").Append(who).Append(": ").Append(dists);
                 float d = (t.position - pos).sqrMagnitude; if (d < bsq) { bsq = d; best = t; owner = cc; }
+            }
+            if (dbg != null)
+            {
+                dbg.AppendLine().Append("   => ").Append(best == null ? "NO CANDIDATE SURVIVED"
+                    : "chose '" + (owner != null ? owner.name : "?") + "' at " + (Mathf.Sqrt(bsq) * 1000f).ToString("F0") + "mm");
+                LiquidWobbleMPBPlugin._logger?.LogWarning(dbg.ToString());
             }
             return best;
         }
@@ -3794,21 +5061,30 @@ namespace LiquidWobbleMPB
             return null;
         }
 
-        // Nearest character (ChaControl) to a world point, within maxRange.
+        // Nearest character (ChaControl) to a world point, within maxRange. Walks up to the ChaControl via
+        // GetComponent("ChaControl") (string overload) so there is no ChaControl type reference. Matches the
+        // BP vagina bone first; if NO character has it (BP not set up on the female), falls back to the vanilla
+        // cf_j_kokan crotch bone (female-gated) so the x-ray still applies without BP. BP scenes are unaffected
+        // - the first pass finds candidates and the fallback never runs.
         private static Component FindNearestCharacter(Vector3 pos, float maxRange = float.MaxValue)
         {
             int cand;
             Component best = FindNearestByBone(pos, maxRange, VaginaBone, false, out cand);
             if (best == null)
             {
-                // No vagina-root candidate at all (BP-less body) OR every one out of range.
+                // No vagina-root candidate at all (BP-less body) OR every one out of range. The latter is the
+                // MAIN-GAME H case: cf_J_Vagina_root is NOT animated with the pose there - it idles at the
+                // character's standing position while the real crotch (cf_j_kokan, which the womb mirrors)
+                // moves with the animation. The kokan fallback is pose-true in both games.
                 LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal:   '" + VaginaBone + "' " + (cand == 0 ? "not present on any character" : "candidate(s) out of range") + " -> fallback to vanilla '" + FallbackBone + "' (female-only).");
                 best = FindNearestByBone(pos, maxRange, FallbackBone, true, out cand);
             }
             return best;
         }
 
-        // Nearest ChaControl owning a bone named `boneName` to `pos`, within maxRange.
+        // Nearest ChaControl owning a bone named `boneName` to `pos`, within maxRange. femaleOnly restricts to
+        // female characters (vanilla cf_j_kokan exists on males too, so the fallback must not grab one).
+        // candCount = qualifying candidates found (0 -> the caller may try a fallback bone).
         private static Component FindNearestByBone(Vector3 pos, float maxRange, string boneName, bool femaleOnly, out int candCount)
         {
             Component best = null; float bestSq = float.MaxValue; int cand = 0; string bestName = "none";
@@ -3833,7 +5109,10 @@ namespace LiquidWobbleMPB
             return best;
         }
 
-        // Female? Read the character's sex by reflection (no hard ChaControl ref).
+        // Female? Read the character's sex by reflection (no hard ChaControl ref). In KK the value lives on
+        // ChaFileParameter, NOT directly on ChaControl, so try cc.fileParam.sex then cc.chaFile.parameter.sex.
+        // It is ChaFileDefine.Sex: 0 = male, 1 = female (do NOT flip this). Unknown -> treat as female: the
+        // fallback bone is female-only anyway and the nearest+range gate still favours the womb's own character.
         private static bool IsFemale(Component cc)
         {
             object sexVal = null;

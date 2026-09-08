@@ -49,6 +49,10 @@
       <HintPath>$(KKDir)\CharaStudio_Data\Managed\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(KKDir)\CharaStudio_Data\Managed\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <Import Project="..\LiquidShaderWobble.Shared\LiquidShaderWobble.Shared.projitems" Label="Shared" />

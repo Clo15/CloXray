@@ -5,9 +5,9 @@ using UnityEngine;
 namespace LiquidWobbleMPB
 {
     /// <summary>
-    /// STUDIO one-key setup (b982). Select the girl, press the hotkey: if she has no womb one is
+    /// STUDIO one-key setup. Select the girl, press the hotkey: if she has no womb one is
     /// added for her, parented to her and left at a zero local transform, and the whole x-ray stack
-    /// is applied — the same work the old hotkey does once a womb exists, minus the find-the-item-
+    /// is applied - the same work the old hotkey does once a womb exists, minus the find-the-item-
     /// and-place-it-in-her step. Pressing again walks her through the stencil pairs so a second (or
     /// third, fourth) girl in the same scene gets her own pair without opening Material Editor;
     /// after the last pair the x-ray comes off her again, and the next press starts over at the first.
@@ -19,7 +19,7 @@ namespace LiquidWobbleMPB
     /// seat maths - and from there it travels with her when she is moved or posed.
     ///
     /// WHAT A "PAIR" IS: one low-5 stencil region value `st` (the girl's body stamp and her womb's
-    /// shell) plus `st+1` (her interior/orginside). Everything else is derived — `_ProtectRef` is
+    /// shell) plus `st+1` (her interior/orginside). Everything else is derived - `_ProtectRef` is
     /// `32 | (st+1)`, since that pass reads the low 5 bits and writes bit5. Two girls on the same
     /// pair would see each other's organs through their own bodies, which is what the pairs prevent.
     /// </summary>
@@ -28,7 +28,7 @@ namespace LiquidWobbleMPB
         // Pairs 4/5, 8/9, 12/13, 16/17. Region 31 is the reserved limb sentinel; 19-30 are free but
         // the shipped slider/manifest ranges stop at four pairs, so four is what this cycles.
         private static readonly int[] Pairs = { 4, 8, 12, 16 };
-        // The womb is identified by its BUNDLE, never by the 8205/1/1 numbers in our own CSVs:
+        // The womb is identified by its BUNDLE, never by the 8205/1/1 numbers in the shipped CSVs:
         // Sideloader re-maps modded studio item IDs at runtime, so those numbers address an
         // unrelated vanilla item in the live game. Studio's own item table is the authority.
         private const string WombBundlePath = "studio/clo/clo_xraywomb.unity3d";
@@ -39,12 +39,13 @@ namespace LiquidWobbleMPB
         // stamp), not the cycle position, and LoadSync below re-derives the womb side from it.
         private static readonly Dictionary<int, int> _step = new Dictionary<int, int>();
 
-        private static string _osd; private static float _osdUntil;
-        internal static string Osd { get { return Time.unscaledTime < _osdUntil ? _osd : null; } }
-        private static void Say(string s, float secs)
+        // On-screen line for anything the hotkey does. BepInEx puts a LogLevel.Message on screen by
+        // itself - the same call the 1.2 line uses - so there is no GUI code of ours to keep working.
+        // _log, NOT _logger: _logger is the diagnostic sink and is null in a shipped build, and this
+        // text is on-screen feedback, not bug-report material.
+        private static void Say(string s)
         {
-            _osd = s; _osdUntil = Time.unscaledTime + secs;
-            LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: " + s);
+            LiquidWobbleMPBPlugin._log?.LogMessage("CloXray: " + s);
         }
 
         internal static void Trigger()
@@ -54,7 +55,7 @@ namespace LiquidWobbleMPB
             Component girl = SelectedFemale();
             if (girl == null)
             {
-                Say("select a female character first, then press the pair hotkey.", 4f);
+                Say("select a female character first, then press the pair hotkey.");
                 return;
             }
 
@@ -63,10 +64,27 @@ namespace LiquidWobbleMPB
             int step;
             if (!_step.TryGetValue(key, out step))
             {
-                // First press on this girl: start at the lowest pair no OTHER character is using, so a
-                // second girl gets her own pair without the user having to think about it.
-                step = FirstFreePairIndex(girl);
-                if (step < 0) { Say("all " + Pairs.Length + " stencil pairs are in use by other characters.", 5f); return; }
+                // _step is per SESSION, so after a scene load every girl reads as a first press even
+                // though the scene already gave her a pair. ADOPT that pair rather than hunting for a
+                // free one: it keeps her exactly where the scene put her (the first press then re-applies
+                // - which is how a saved setup gets upgraded - and later presses cycle as always), and it
+                // is the only thing that works at all once every pair is spoken for.
+                step = HerPairIndex(girl);
+                if (step < 0)
+                {
+                    // Genuinely new to the x-ray: lowest pair no OTHER character is using, so a second
+                    // girl gets her own with nothing to think about. Past the fourth girl
+                    // there is nothing left to hand out - share pair 1 rather than refuse. Two girls on
+                    // one pair read the same stencil values, so their windows can show through each
+                    // other where they overlap on screen; a press cycles her off it like any other pair.
+                    step = FirstFreePairIndex(girl);
+                    if (step < 0)
+                    {
+                        step = 0;
+                        LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: all " + Pairs.Length
+                            + " stencil pairs are taken - '" + girl.name + "' shares pair 1. Overlapping windows can bleed between the two.");
+                    }
+                }
             }
             else
             {
@@ -75,7 +93,7 @@ namespace LiquidWobbleMPB
                 {
                     _step.Remove(key);
                     RemoveSetup(girl);
-                    Say("x-ray off '" + girl.name + "' (her womb is untouched). Press again for pair 1.", 4f);
+                    Say("x-ray off '" + girl.name + "' (her womb is untouched). Press again for pair 1.");
                     return;
                 }
             }
@@ -88,23 +106,32 @@ namespace LiquidWobbleMPB
                 if (oci == null) return;   // AddWombFor logged the reason; nothing applied (no fallback)
                 _pendingItem = oci; _pendingGirl = girl; _pendingPair = step;
                 _pendingUntil = Time.unscaledTime + 3f;
-                Say("adding a womb for '" + girl.name + "'...", 2f);
+                Say("adding a womb for '" + girl.name + "'...");
                 return;
             }
 
             if (!SetPairAll(girl, Pairs[step], null))
             {
-                Say("could not set the stencil pair on '" + girl.name + "'s womb - see the log.", 5f);
+                Say("could not set the stencil pair on '" + girl.name + "'s womb - see the log.");
                 return;
             }
             _step[key] = step;
 
-            AutoBodyReveal.ApplyAll();   // the shipped apply path: stamps her body, x-rays and aims the penis
-            Say("'" + girl.name + "' -> pair " + (step + 1) + " of " + Pairs.Length
-                + " (stencil " + Pairs[step] + "/" + (Pairs[step] + 1) + "). Press again for the next pair.", 4f);
+            // Takeover: this key promises a finished setup, so a penis held by a stray hand-made
+            // constraint is claimed rather than skipped (other wombs' penises stay untouchable).
+            AutoBodyReveal.PenisNote = null; AutoBodyReveal.PenisUpgraded = false;
+            AutoBodyReveal.PenisTakeover = true;
+            MEBridge.UpgradeStack = true;   // this key opts the character into the sub-2500 stack
+            try { AutoBodyReveal.ApplyAll(); }   // the shipped apply path: stamps her body, x-rays and aims the penis
+            finally { AutoBodyReveal.PenisTakeover = false; MEBridge.UpgradeStack = false; }
+            Say("'" + girl.name + "' -> womb added, pair " + (step + 1) + " of " + Pairs.Length
+                + " (stencil " + Pairs[step] + "/" + (Pairs[step] + 1) + ")"
+                + (AutoBodyReveal.PenisNote != null ? ", " + AutoBodyReveal.PenisNote : "")
+                + (AutoBodyReveal.PenisUpgraded ? ", old single-material penis UPGRADED" : "")
+                + ". Press again for the next pair.");
         }
 
-        // A womb we just asked Studio for, waiting for its own component to come up.
+        // A womb just requested from Studio, waiting for its own component to come up.
         private static Studio.ObjectCtrlInfo _pendingItem, _pendingParent; private static Component _pendingGirl;
         private static int _pendingPair; private static float _pendingUntil;
 
@@ -125,7 +152,7 @@ namespace LiquidWobbleMPB
                 LiquidWobbleMPBPlugin._logger?.LogError("CloXray: the womb item never came up as a CloXray womb - removing it. "
                     + "Check that [Clo]XrayWomb1.zipmod matches this plugin version.");
                 DeleteNode(_pendingItem);
-                Say("could not add a womb - see the log.", 5f);
+                Say("could not add a womb - see the log.");
                 _pendingItem = null; _pendingGirl = null; _pendingParent = null;
                 return;
             }
@@ -171,12 +198,21 @@ namespace LiquidWobbleMPB
             var girl = _pendingGirl; int step = _pendingPair;
             _pendingItem = null; _pendingGirl = null; _pendingParent = null;
             if (girl == null) return;
-            if (!SetPairAll(girl, Pairs[step], w)) { Say("could not set the stencil pair - see the log.", 5f); return; }
+            if (!SetPairAll(girl, Pairs[step], w)) { Say("could not set the stencil pair - see the log."); return; }
             _step[girl.GetInstanceID()] = step;
-            AutoBodyReveal.ApplyAll();
+            AutoBodyReveal.PenisNote = null; AutoBodyReveal.PenisUpgraded = false;
+            AutoBodyReveal.PenisTakeover = true;
+            MEBridge.UpgradeStack = true;   // this key opts the character into the sub-2500 stack
+            try { AutoBodyReveal.ApplyAll(); }
+            finally { AutoBodyReveal.PenisTakeover = false; MEBridge.UpgradeStack = false; }
             Say("'" + girl.name + "' -> pair " + (step + 1) + " of " + Pairs.Length
-                + " (stencil " + Pairs[step] + "/" + (Pairs[step] + 1) + "). Press again for the next pair.", 4f);
+                + " (stencil " + Pairs[step] + "/" + (Pairs[step] + 1) + ")"
+                + (SharedPair(girl, step) ? " SHARED - windows can bleed where they overlap" : "")
+                + (AutoBodyReveal.PenisNote != null ? ", " + AutoBodyReveal.PenisNote : "")
+                + (AutoBodyReveal.PenisUpgraded ? ", old single-material penis UPGRADED" : "")
+                + ". Press again for the next pair.");
         }
+
 
         // ---- selection / lookup ---------------------------------------------------------------
 
@@ -208,10 +244,10 @@ namespace LiquidWobbleMPB
         }
 
         /// EVERY womb already serving this girl. Deliberately the SAME resolver the apply path uses,
-        /// which matches by parenting and by proximity — so a womb someone dropped near her but not
+        /// which matches by parenting and by proximity - so a womb someone dropped near her but not
         /// exactly in the slot counts as hers and no second one is added.
         /// A girl can wear more than one (Womb 1 + Womb 2 in the same scene is a normal setup), and
-        /// they all have to be handled together — see SetPairAll.
+        /// they all have to be handled together - see SetPairAll.
         private static List<WombExpandEffect> WombsFor(Component girl)
         {
             var list = new List<WombExpandEffect>();
@@ -225,7 +261,7 @@ namespace LiquidWobbleMPB
             return list;
         }
 
-        /// Put ALL of her wombs on one pair (b997). Her BODY carries a single stencil ref, so two
+        /// Put ALL of her wombs on one pair. Her BODY carries a single stencil ref, so two
         /// wombs on different pairs cannot both be visible through her - whichever one does not match
         /// her stamp simply stops showing; setting only the first womb found would leave the rest dark.
         private static bool SetPairAll(Component girl, int st, WombExpandEffect extra)
@@ -238,6 +274,34 @@ namespace LiquidWobbleMPB
                 LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: '" + girl.name + "' wears " + list.Count
                     + " wombs - all set to stencil " + st + "/" + (st + 1) + " (her body can only carry one pair).");
             return ok > 0;
+        }
+
+        // Is another character already on this pair? Only for the on-screen warning.
+        private static bool SharedPair(Component girl, int step)
+        {
+            foreach (var w in UnityEngine.Object.FindObjectsOfType<WombExpandEffect>())
+            {
+                if (w == null) continue;
+                string how;
+                var cc = AutoBodyReveal.ResolveWearer(w, out how);
+                if (cc == null || cc.GetInstanceID() == girl.GetInstanceID()) continue;
+                if (w.OrganStencil() == Pairs[step]) return true;
+            }
+            return false;
+        }
+
+        // The pair THIS girl is already on, from her own womb, or -1 if she has none. Read from the
+        // womb rather than from a material: it is the same value SetPairAll writes and the same one
+        // FirstFreePairIndex treats as taken, so the two can never disagree.
+        private static int HerPairIndex(Component girl)
+        {
+            foreach (var w in WombsFor(girl))
+            {
+                if (w == null) continue;
+                int st = w.OrganStencil();
+                for (int i = 0; i < Pairs.Length; i++) if (Pairs[i] == st) return i;
+            }
+            return -1;
         }
 
         private static int FirstFreePairIndex(Component girl)
@@ -386,7 +450,7 @@ namespace LiquidWobbleMPB
         }
 
         /// End of the cycle: take the x-ray off HER and leave everything else alone. The womb item
-        /// stays - it is an object the user may have animated, re-shaped or tuned in Material Editor,
+        /// stays - it is an object that may carry animation, a re-shape or Material Editor edits,
         /// and a stray keypress must never destroy that. Deleting it is one click in the workspace.
         private static void RemoveSetup(Component girl)
         {
@@ -400,24 +464,18 @@ namespace LiquidWobbleMPB
         private static bool SetPair(WombExpandEffect w, int st)
         {
             if (w == null) return false;
+            // one writer for the womb item's pair AND stack, so what the hotkey sets is exactly
+            // what the scene saves and the loader restores. Keeps the stack it is already on.
+            int curSt; bool up;
+            AutoBodyReveal.ReadWombState(w, out curSt, out up);
+            AutoBodyReveal.ApplyWombState(w, st, up);
             int touched = 0;
             foreach (var r in w.GetComponentsInChildren<Renderer>(true))
             {
-                if (r == null) continue;
-                bool relevant = false;
+                if (r == null || r.sharedMaterials == null) continue;
                 foreach (var sm in r.sharedMaterials)
                     if (sm != null && sm.shader != null
-                        && (sm.shader.name == "CloXray/Organ" || sm.shader.name == "CloXray/OrgInside")) { relevant = true; break; }
-                if (!relevant) continue;
-                foreach (var m in r.materials)
-                {
-                    if (m == null || m.shader == null) continue;
-                    if (m.shader.name != "CloXray/Organ" && m.shader.name != "CloXray/OrgInside") continue;
-                    if (m.HasProperty("_StencilBody"))        m.SetFloat("_StencilBody", st);
-                    if (m.HasProperty("_StencilBody_Plus_1")) m.SetFloat("_StencilBody_Plus_1", st + 1);
-                    if (m.HasProperty("_ProtectRef"))         m.SetFloat("_ProtectRef", 32 + st + 1);
-                    touched++;
-                }
+                        && (sm.shader.name == "CloXray/Organ" || sm.shader.name == "CloXray/OrgInside")) { touched++; break; }
             }
             if (touched == 0)
                 LiquidWobbleMPBPlugin._logger?.LogError("CloXray: '" + w.name
@@ -426,26 +484,40 @@ namespace LiquidWobbleMPB
         }
 
         /// AFTER A SCENE LOAD the two halves of a pair can disagree: MaterialEditor restores HER body
-        /// stamp (it persists our copies), while the womb comes back from its bundle at the shipped
-        /// 4/5. Her stamp is therefore the surviving record of which pair the scene used — copy it
-        /// back onto the womb rather than inventing scene data of our own. No-op for a scene that
-        /// never left pair 1, and it only ever runs when the two genuinely disagree.
+        /// stamp (ME persists those copies), while a womb that nothing spoke for comes back from its
+        /// bundle at the shipped 4/5. Her stamp is then the surviving record of which pair the scene
+        /// used - copy it back onto the womb rather than inventing scene data.
+        ///
+        /// BUT a womb that is NOT on the shipped 4 was spoken for: ME persists the womb item's
+        /// _StencilBody too, and has restored it by now. A disagreement between her stamp and a womb
+        /// carrying a deliberate pair is not damage to repair - it is two saved values, and the scene
+        /// is the authority on both. Adopt it and say so; the hotkey is what re-pairs a scene.
+        /// Queues are left alone here for the same reason (see ApplyWombState's adoptOnly note).
         internal static void LoadSync(Component girl, WombExpandEffect womb)
         {
             if (girl == null || womb == null || !MainGameWomb.IsStudio) return;
             int bodyRef = MEBridge.ReadBodyStencilRef(girl);
-            if (bodyRef <= 0 || bodyRef == womb.OrganStencil()) return;
+            int wombRef = womb.OrganStencil();
+            if (bodyRef <= 0 || bodyRef == wombRef) return;
             bool known = false;
             foreach (int p in Pairs) if (p == bodyRef) { known = true; break; }
             if (!known)
             {
                 LiquidWobbleMPBPlugin._logger?.LogError("CloXray: '" + girl.name + "' carries stencil ref " + bodyRef
-                    + ", which is not one of the shipped pairs - leaving her womb on " + womb.OrganStencil() + ".");
+                    + ", which is not one of the shipped pairs - leaving her womb on " + wombRef + ".");
                 return;
             }
-            if (SetPair(womb, bodyRef))
+            if (wombRef != AutoBodyReveal.ShippedStencilBody)
+            {
                 LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: '" + girl.name + "' loaded on stencil pair " + bodyRef
-                    + "/" + (bodyRef + 1) + " - matched her womb to it.");
+                    + "/" + (bodyRef + 1) + ", her womb '" + womb.name + "' on " + wombRef + "/" + (wombRef + 1)
+                    + " - both were saved with the scene, so the womb keeps what it was given. Press the apply"
+                    + " hotkey to put them on one pair.");
+                return;
+            }
+            if (AutoBodyReveal.ApplyWombState(womb, bodyRef, false, true) > 0)
+                LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: '" + girl.name + "' loaded on stencil pair " + bodyRef
+                    + "/" + (bodyRef + 1) + " - her womb came back on the shipped pair, so it was matched to hers.");
         }
     }
 }

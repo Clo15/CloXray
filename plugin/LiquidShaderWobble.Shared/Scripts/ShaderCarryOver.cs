@@ -5,14 +5,34 @@ using UnityEngine;
 
 namespace LiquidWobbleMPB
 {
-    // REPLACE, so a scene made with the shaders survives swapping a character for a different card, WITHOUT
-    // needing a womb in the scene.
+    // Carry the AUTHOR's CloXray material setup across a Studio character
+    // REPLACE, so a scene made with these shaders survives swapping a character for a different card,
+    // WITHOUT needing a womb in the scene (the womb-proximity re-apply is womb-gated; a shader-only
+    // scene would otherwise lose the x-ray on swap).
+    //
+    // MECHANISM (event-driven, keyed to the STUDIO SLOT which survives a replace):
+    //   - CAPTURE: read the CloXray material COPIES straight off the live
+    //     renderers - the copies ME has already restored - and record each copy's shader, queue and
+    // the KNOWN x-ray float properties. (The earlier private-ME-record reflection was fragile:
+    //     per-record-type fields + ObjectType matching silently found nothing. The live materials are
+    //     exactly what `hasOurShaders` already proved is present, so this can't miss.)
+    //   • REPLAY on the replacement: recreate the copies FROM THE NEW CHARACTER'S base material (so it
+    // keeps its own textures/look), set the shader + queue + the captured x-ray floats, then
+    //     RE-DERIVE clothes reveal on the new outfit (EnsureClothesReveal at the captured stencil).
+    //
+    // ANTI-DEGRADATION: only look-NEUTRAL x-ray params cross over; textures come from the fresh copy.
+    // A NON-CloXray copy (the penis "original-look" re-draw @3502) keeps the new char's own shader -
+    // only its render queue is carried.
+    //
+    // Studio-only; if ME reflection can't bind it goes inert (loud error once), never a silent fallback.
     internal static class ShaderCarryOver
     {
         private const string CloPrefix = "CloXray/";
-        private const int OriginalRedrawQueue = 3502;   // the one non-CloXray copy we still recreate (penis look)
+        private const int OriginalRedrawQueue   = 3502;   // the one non-CloXray copy still recreated (penis look)
+        private const int OriginalRedrawQueueUp = 2484;   // ...and its upgraded-stack twin
 
-        // Unity property names (with leading _) of every setting the shaders expose.
+        // Unity property names (with leading _) of every setting these shaders expose. ME's setter takes
+        // the name WITHOUT the underscore, so that is what is stored.
         private static readonly string[] KnownProps =
         {
             "_StencilRef", "_StencilBody", "_StencilBody_Plus_1",
@@ -33,7 +53,7 @@ namespace LiquidWobbleMPB
 
         private static readonly Dictionary<int, Snap> _snap = new Dictionary<int, Snap>();
 
-        // ── reflection: just the ME controller type + ObjectType.Character + the setters ───────────.
+        // ── reflection: just the ME controller type + ObjectType.Character + the setters ───────────
         private static bool _init, _ok;
         private static Type _ctrlType, _objTypeEnum; private static object _otChar;
         private static MethodInfo _mCopyRemove, _mSetShader, _mSetQueue, _mSetFloat;
@@ -74,10 +94,13 @@ namespace LiquidWobbleMPB
             LiquidWobbleMPBPlugin._logger?.LogError("ShaderCarryOver: DISABLED — " + why + ". Character-replace carry-over will NOT run (no fallback). Fix the ME reflection binding.");
         }
 
-        // Pre-reload capture: snapshot the OUTGOING character before its card swaps (covers a setup applied
-        // in-session with no reload after).
+        // Pre-reload capture: snapshot the OUTGOING character before its card swaps (covers a setup
+        // applied in-session with no reload after). Walk the ChaControl type hierarchy for ChangeChara.
         private static HarmonyLib.Harmony _hook; private static bool _hookInstalled;
-        // PRE-REPLACE hook. The replace call lives on Studio's OCIChar, NOT on ChaControl.
+        // PRE-REPLACE hook. The replace call lives on Studio's OCIChar, NOT on ChaControl - patching the
+        // ChaControl hierarchy found zero overloads and this hook silently never ran, leaving the snapshot
+        // to the reload path alone. It also arms the uncensor hand-over, which has to happen before the new
+        // card is read.
         private static void InstallCaptureHook(Type ccType)
         {
             if (_hookInstalled) return;
@@ -122,6 +145,19 @@ namespace LiquidWobbleMPB
 
         // ── public entry: called from the deferred (post-ME-restore) reload path ───────────────────
         // Returns TRUE only when it REPLAYED a snapshot (the caller then skips the womb-proximity apply).
+        /// Drop every snapshot. Studio numbers its objects per scene and re-uses the low ids, so a
+        /// snapshot taken from slot 3 in the OUTGOING scene would be replayed onto whoever lands in
+        /// slot 3 of the incoming one - creating material copies and setting CloXray shaders on a
+        /// character the loaded scene never gave any to. Carry-over exists for a REPLACE inside one
+        /// scene; a Load or a Clear ends the scene its snapshots describe.
+        internal static void ForgetAll()
+        {
+            if (_snap.Count == 0) return;
+            LiquidWobbleMPBPlugin._logger?.LogInfo("ShaderCarryOver: dropping " + _snap.Count
+                + " material snapshot(s) - they belong to the outgoing scene.");
+            _snap.Clear();
+        }
+
         public static bool OnReloaded(Component cc)
         {
             if (!MainGameWomb.IsStudio || cc == null) return false;
@@ -153,7 +189,8 @@ namespace LiquidWobbleMPB
         }
 
         // A womb (clo_xraywomb) is a Studio item often parented UNDER the character; its own CloXray
-        // Liquid/Organ materials must NOT count as "the character has the shaders" nor be captured.
+        // Liquid/Organ materials must NOT count as "the character has CloXray shaders" nor be captured -
+        // only the character's own body/clothes REVEAL COPIES are ours to carry. Skip womb subtrees.
         private static bool IsWombRenderer(Renderer r)
         {
             return r != null && r.GetComponentInParent<WombExpandEffect>() != null;
@@ -193,7 +230,12 @@ namespace LiquidWobbleMPB
             var snap = new Snap();
             string dbg = "";
             // Only materials on the BODY object are captured. Replay hands MaterialEditor that same
-            // GameObject with ObjectType.Character and ME looks for the source material underneath it, so a garment material (which lives on a clothing object) can never be recreated this way.
+            // GameObject with ObjectType.Character and ME looks for the source material underneath it, so
+            // a garment material (which lives on a clothing object) can never be recreated this way - the
+            // copy call returns an empty name and records a row ME cannot resolve. Clothes do not need
+            // carrying anyway: a replacement card wears a different outfit, and the clothes x-ray is
+            // re-derived for what she is actually wearing. The penis/balls materials DO sit under the body
+            // object, so the male's x-ray still carries.
             var bodyGo = BodyGo(cc);
             Transform bodyT = bodyGo != null ? bodyGo.transform : null;
             int skippedClothes = 0;
@@ -208,7 +250,7 @@ namespace LiquidWobbleMPB
                         dbg += "\n    [" + r.name + "] '" + m.name + "' shader='" + m.shader.name + "' q=" + m.renderQueue;
                     if (!isCopy) continue;
                     bool clo = m.shader.name.StartsWith(CloPrefix);
-                    bool origLook = !clo && m.renderQueue == OriginalRedrawQueue;   // penis original-look copy
+                    bool origLook = !clo && (m.renderQueue == OriginalRedrawQueue || m.renderQueue == OriginalRedrawQueueUp);   // penis original-look copy, either stack
                     if (!clo && !origLook) continue;
                     if (bodyT == null || !r.transform.IsChildOf(bodyT)) { skippedClothes++; continue; }
 
@@ -240,7 +282,7 @@ namespace LiquidWobbleMPB
             var go = BodyGo(cc);
             if (go == null) { LiquidWobbleMPBPlugin._logger?.LogError("ShaderCarryOver: no body GameObject on '" + cc.name + "' — cannot carry over."); return; }
 
-            // group by base, preserving the captured (index-sorted) order.
+            // group by base, preserving the captured (index-sorted) order
             var byBase = new Dictionary<string, List<CopyRec>>();
             foreach (var rec in snap.copies)
             {
@@ -255,12 +297,19 @@ namespace LiquidWobbleMPB
                 if (baseMat == null) { ReportNotCarried(kv.Key, "she does not have that material"); continue; }
                 foreach (var rec in kv.Value)
                 {
-                    // The new copy is identified BY NAME, never by reference.
+                    // The new copy is identified BY NAME, never by reference: assigning renderer.materials
+                    // (which ME's copy call does internally) re-instances every entry, so on a pristine
+                    // incoming body a reference-diff saw ALL materials as "new" and resolved the copy to
+                    // sharedMaterials[0] - the ORIGINAL - which then had a CloXray shader persisted onto
+                    // it (the invisible-body corruption).
+                    // Which copy did ME just make? Its own MaterialCopyList says so. Diffing the
+                    // renderer's materials cannot: ME's copy call reassigns the array, so on a pristine
+                    // incoming body every entry looks new and the "copy" resolved to the ORIGINAL - which
+                    // then had a CloXray shader persisted onto it (the invisible-body corruption).
                     Material nw = CreateCopyTracked(ctrl, rend, baseMat, go, kv.Key);
                     if (nw == null) continue;
 
-                    // CloXray copy -> set the shader; NON-CloXray (penis look) -> keep the new char's own
-                    // shader.
+                    // CloXray copy -> set the CloXray shader; NON-CloXray (penis look) -> keep the new char's own shader.
                     if (rec.clo && !string.IsNullOrEmpty(rec.shader)) _mSetShader.Invoke(ctrl, new object[] { 0, _otChar, nw, rec.shader, go, true });
                     _mSetQueue.Invoke(ctrl, new object[] { 0, _otChar, nw, rec.queue, go, true });   // queue = look-neutral, always safe
                     if (rec.clo)
@@ -270,9 +319,14 @@ namespace LiquidWobbleMPB
                 }
             }
 
-            // Clothes/accessory reveal is OUTFIT-specific.
+            // Clothes/accessory reveal is OUTFIT-specific - RE-DERIVE it on the new character's CURRENT
+            // clothes using the captured stencil, exactly like the womb path (minus the womb). Same
+            // CfgClothesReveal gate. Studio path = clothes only (accessory reveal is Free-H).
             if (LiquidWobbleMPBPlugin.CfgClothesReveal && snap.stencil >= 0)
-                MEBridge.EnsureClothesReveal(cc, snap.stencil, false);
+                // allowCreate: TRUE. This is a character SWAP - the new girl's outfit has no copies at
+                // all, and carry-over exists precisely to reproduce what the old one had. Leaving her
+                // dressed opaque would defeat the feature. Not the passive-load case guarded elsewhere.
+                MEBridge.EnsureClothesReveal(cc, snap.stencil, false, true);
 
             if (_notCarried.Count > 0)
             {
@@ -284,11 +338,14 @@ namespace LiquidWobbleMPB
                 + " copy(ies)" + (LiquidWobbleMPBPlugin.CfgClothesReveal && snap.stencil >= 0 ? " + re-derived clothes reveal @stencil " + snap.stencil : "") + " (new char keeps its own textures/look).");
         }
 
-        // Creates a copy through ME (persisted) and returns exactly the material ME recorded, or null with a
-        // logged reason.
+        // Creates a copy through ME (persisted) and returns exactly the material ME recorded, or null
+        // with a logged reason. Mirrors MEBridge.CreateCopyTracked; both read ME's MaterialCopyList.
         private static FieldInfo _fCopyList, _fCopyName, _fCopySource;
 
-        // A missing BODY material is a real failure (that is the x-ray stamp).
+        // A missing BODY material is a real failure (that is the x-ray stamp). A missing GARMENT material
+        // is the normal case: the incoming card wears a different outfit, and the clothes reveal is
+        // RE-DERIVED for what she is actually wearing rather than copied. Those are collected and reported
+        // as one line instead of one alarming error each.
         private static readonly List<string> _notCarried = new List<string>();
         private static bool IsBodyMat(string n) { return n != null && n.IndexOf("_m_body", StringComparison.OrdinalIgnoreCase) >= 0; }
         private static void ReportNotCarried(string matName, string why)
@@ -322,7 +379,8 @@ namespace LiquidWobbleMPB
                         made = n;
                     }
                 // An EMPTY copy name means ME's CopyMaterial could not find the material to copy (the new
-                // card does not have it) and still recorded a row.
+                // card does not have it) and still recorded a row - that row is junk ME can never resolve
+                // on a later load, so drop it instead of letting it be saved.
                 if (made != null && made.Length == 0) { DropEmptyCopyRow(rows, src); made = null; }
                 if (made == null) { ReportNotCarried(srcLabel, "the new character does not have it"); return null; }
                 foreach (var m in rend.sharedMaterials)
