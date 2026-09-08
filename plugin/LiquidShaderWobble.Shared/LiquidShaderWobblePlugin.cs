@@ -13,7 +13,7 @@ namespace LiquidWobbleMPB
     {
         public const string Guid = "Clo.LiquidWobbleMPB";
         public const string Name = "LiquidWobbleMPB";
-        public const string Version = "1.1.3";
+        public const string Version = "1.1.4";
 
         // The gated view of the log sink: null = silent, and every `_logger?.LogX(...)` in the plugin
         // is a no-op. Never assign it directly - ApplyLogVisibility() owns it.
