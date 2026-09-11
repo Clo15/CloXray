@@ -2,30 +2,12 @@
 
 ## 1.1.5
 
-**Toys drive the rings the way they did in 1.1.3.** In 1.1.4 the lower rings opened as a toy slid
-out. The engage grace now holds the penis thickness together with the depth, and a collider's
-depth is measured along the canal instead of in BetterPenetration's units.
+Bug-fix release. Scenes made with earlier versions look the way they did again.
 
-**`Ctrl+Shift+W` only considers characters that are shown.** A scene that keeps several males in
-place and shows one at a time could have the hidden one claimed. The claim, the order in which
-several wombs are served and whether an orifice is already taken now skip hidden characters, and
-the womb looks for a visible penis at the moment it pairs instead of trusting an old answer.
-Automatic passes after a load or a body change still see hidden characters, so a scene that swaps
-characters on its timeline keeps working.
-
-**`Ctrl+Shift+W` clears KKPE bends on the penis it claims.** KKPE re-applies saved bone edits after
-BetterPenetration has posed the shaft, so a saved rotation kept the penis pointing away from its
-target. Rotation and position edits on the bones BetterPenetration poses, and on the two dan nodes,
-are reset through KKPE's own reset. Scale edits are kept, and a bone driven by Studio FK is left
-alone and reported.
-
-**BetterPenetration is re-armed on `Ctrl+Shift+W`** for entry links the scene already had, so a womb
-added to such a couple reads depth without re-making the links.
-
-**The tip may sit at least 30mm off the canal's centre line** before a womb stops reacting.
-
-**Notes and log lines say what happened.** The on-screen note names the aim outcome and why the
-penis was chosen, and a link that could not be added is reported instead of passing silently.
+- Toys open the canal the way they did in 1.1.3.
+- `Ctrl+Shift+W` ignores hidden characters and clears KKPE bends that kept the penis from pointing
+  into the womb.
+- A penis slightly off the canal's centre keeps the womb reacting.
 
 ## 1.1.4
 
