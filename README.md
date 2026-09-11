@@ -15,6 +15,13 @@ lines up even on odd-sized characters (very small or very large girls and males 
 sizing tables for common animations ship with the mod; anything unknown is learned after a
 single stroke and remembered.
 
+### Fixed in 1.1.5
+
+- **Toys** open the canal the way they did in 1.1.3 again.
+- **`Ctrl+Shift+W`** ignores hidden characters, resets KKPE bends on the penis it claims, and re-arms
+  BetterPenetration for couples that were already linked.
+- **A penis slightly off the canal's centre** keeps the womb reacting (at least 30mm).
+
 ### New in 1.1.4
 
 - **Tessellated skin no longer defeats the window.** KKUTS_Tess and its family displace the skin in

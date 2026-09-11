@@ -124,7 +124,7 @@ namespace LiquidWobbleMPB
             MEBridge.UpgradeStack = true;   // this key opts the character into the sub-2500 stack
             try { AutoBodyReveal.ApplyAll(); }   // the shipped apply path: stamps her body, x-rays and aims the penis
             finally { AutoBodyReveal.PenisTakeover = false; MEBridge.UpgradeStack = false; }
-            Say("'" + girl.name + "' -> womb added, pair " + (step + 1) + " of " + Pairs.Length
+            Say("'" + girl.name + "' -> pair " + (step + 1) + " of " + Pairs.Length
                 + " (stencil " + Pairs[step] + "/" + (Pairs[step] + 1) + ")"
                 + (AutoBodyReveal.PenisNote != null ? ", " + AutoBodyReveal.PenisNote : "")
                 + (AutoBodyReveal.PenisUpgraded ? ", old single-material penis UPGRADED" : "")
@@ -205,7 +205,7 @@ namespace LiquidWobbleMPB
             MEBridge.UpgradeStack = true;   // this key opts the character into the sub-2500 stack
             try { AutoBodyReveal.ApplyAll(); }
             finally { AutoBodyReveal.PenisTakeover = false; MEBridge.UpgradeStack = false; }
-            Say("'" + girl.name + "' -> pair " + (step + 1) + " of " + Pairs.Length
+            Say("'" + girl.name + "' -> womb added, pair " + (step + 1) + " of " + Pairs.Length
                 + " (stencil " + Pairs[step] + "/" + (Pairs[step] + 1) + ")"
                 + (SharedPair(girl, step) ? " SHARED - windows can bleed where they overlap" : "")
                 + (AutoBodyReveal.PenisNote != null ? ", " + AutoBodyReveal.PenisNote : "")

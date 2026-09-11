@@ -131,7 +131,7 @@ namespace LiquidWobbleMPB
                 if (_mSetCollisionAgent == null)
                 {
                     LiquidWobbleMPBPlugin._logger?.LogError("BPBridge: BetterPenetrationController.SetCollisionAgent"
-                        + "(ChaControl,bool,bool,bool) not found - cannot re-arm BP's orifice after a load. "
+                        + "(ChaControl,bool,bool,bool) not found - cannot re-arm BP's orifice. "
                         + "Delete and re-add the cf_J_Vagina_root -> k_f_dan_entry constraint by hand instead.");
                     return 0;
                 }
@@ -176,8 +176,7 @@ namespace LiquidWobbleMPB
                     _mSetCollisionAgent.Invoke(o, new object[] { her, true, false, false });
                     armed++;
                     LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: re-armed BetterPenetration on '"
-                        + ctlComp.name + "' -> '" + her.name + "' (vaginal). A scene load restores the "
-                        + "constraints before BP's agent exists, so BP never saw them.");
+                        + ctlComp.name + "' -> '" + her.name + "' (vaginal).");
                 }
                 catch (Exception e)
                 { LiquidWobbleMPBPlugin._logger?.LogWarning("BPBridge: SetCollisionAgent failed on '" + ctlComp.name + "': " + e.Message); }
@@ -675,7 +674,13 @@ namespace LiquidWobbleMPB
                 if (oc == null) continue;
                 string nm = oc.gameObject.name;
                 if (wearer != null && oc.gameObject == wearer.gameObject) continue;   // her own womb
-                if (!OwnsPenis(i)) continue;   // a real penis mesh, not a name: female-bodied penetrators count
+                // Pairing runs only on events, and while no womb is paired nothing reads the cache per frame, so its
+                // refresh timer stands still and _hasPenis can be minutes old - a penis shown since then (the hotkey
+                // unhides the one it claims) would never be seen. Ask the live question here, and store the answer
+                // so the per-frame read of the paired male agrees with it.
+                bool visible = MEBridge.HasVisiblePenisMesh(oc);
+                if (i < _hasPenis.Length) _hasPenis[i] = visible;
+                if (!visible) continue;
                 Transform entry = (i < _entryBones.Length) ? _entryBones[i] : null;
                 if (entry == null) continue;
                 Vector3 rel = entry.position - wombEntrance;

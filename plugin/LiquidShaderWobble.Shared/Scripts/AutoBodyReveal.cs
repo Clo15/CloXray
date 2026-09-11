@@ -3247,13 +3247,9 @@ namespace LiquidWobbleMPB
                     true, parentTransform, childTransform, true, Vector3.zero, false, Quaternion.identity, false, Vector3.zero, alias });
                 string pair = "'" + parentTransform.name + "' -> '" + childTransform.name + "'";
                 if (res == null) { LiquidWobbleMPBPlugin._logger?.LogInfo("NodeConstraintBridge: constraint " + pair + " already present."); return true; }
-                // Will it actually DRIVE? A link only moves a bone if an endpoint is a live Studio node (GuideObject).
-                bool? gp = GuideObjectBridge.IsGuideObject(parentTransform);
-                bool? gc = GuideObjectBridge.IsGuideObject(childTransform);
-                if (gp == false && gc == false)
-                    LiquidWobbleMPBPlugin._logger?.LogWarning("NodeConstraintBridge: added " + pair + " BUT neither endpoint is a live Studio node (GuideObject) -> it will NOT drive (parentGuideObj=" + gp + " childGuideObj=" + gc + "). Activate the node (select penis_target / enable the penis FK via KK_AdditionalFKNodes).");
-                else
-                    LiquidWobbleMPBPlugin._logger?.LogInfo("NodeConstraintBridge: added " + pair + " (parentGuideObj=" + gp + " childGuideObj=" + gc + " -> drives).");
+                // No GuideObject check: NodesConstraints moves the child transform itself every frame, so the
+                // link drives whether or not either endpoint is a Studio node.
+                LiquidWobbleMPBPlugin._logger?.LogInfo("NodeConstraintBridge: added " + pair + ".");
                 return true;
             }
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("NodeConstraintBridge: AddConstraint failed (" + parentTransform.name + " -> " + childTransform.name + "): " + e.Message); return false; }
@@ -4172,9 +4168,9 @@ namespace LiquidWobbleMPB
 
         // Where the penis entry is pinned on the receiver: whichever of her BP entry bones the womb
         // actually sits at. A womb placed in the anal slot anchors to her anal root, not her vagina.
-        // Falls back to the vanilla crotch bone when she carries no BP bones at all.
+        // Seated in none of them: the womb's own canal mouth. `shownOnly` as in AnchorTakenBy.
 
-        private static Transform EntryAnchorFor(WombExpandEffect w, Component receiver, Transform ourEntry)
+        private static Transform EntryAnchorFor(WombExpandEffect w, Component receiver, Transform ourEntry, bool shownOnly)
         {
             if (receiver == null || w == null) return null;
             Vector3 mouth = w.EntranceWorld();
@@ -4200,9 +4196,10 @@ namespace LiquidWobbleMPB
             foreach (var kv in seats)
             {
                 if (kv.Key > OrificeSeatRange) break;                 // not seated in this one, nor any farther one
-                if (AnchorTakenBy(kv.Value, ourEntry)) continue;      // that orifice already has a penis
+                if (AnchorTakenBy(kv.Value, ourEntry, shownOnly)) continue;   // that orifice already has a penis
                 if (Debug) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + wn + "' entry anchor = '" + kv.Value.name
-                    + "' (" + (kv.Key * 100f).ToString("F1") + "cm from the womb mouth; BetterPenetration drives this orifice).");
+                    + "' (" + (kv.Key * 100f).ToString("F1") + "cm from the womb mouth - the nearest orifice within "
+                    + (OrificeSeatRange * 100f).ToString("F0") + "cm not holding another " + (shownOnly ? "shown " : "") + "male's penis).");
                 return kv.Value;
             }
 
@@ -4234,11 +4231,20 @@ namespace LiquidWobbleMPB
         private static readonly string[] BpOrifices = { VaginaBone, "cf_j_ana", "cf_J_Ana_Root" };
         private const float OrificeSeatRange = 0.10f;   // beyond this the womb is not sitting in that orifice
 
-        // Is this bone already driving a DIFFERENT penis's entry?
-        private static bool AnchorTakenBy(Transform anchor, Transform ourEntry)
+        // Is this bone already driving a DIFFERENT penis's entry? With `shownOnly` (a key press) a hidden
+        // character's link does not count: a scene that swaps which male is shown links them all to one orifice.
+        private static bool AnchorTakenBy(Transform anchor, Transform ourEntry, bool shownOnly)
         {
             foreach (var pair in NodeConstraintBridge.LivePairs())
-                if (pair.Key == anchor && pair.Value != null && pair.Value.name == DanEntryBone && pair.Value != ourEntry) return true;
+            {
+                if (pair.Key != anchor || pair.Value == null || pair.Value.name != DanEntryBone || pair.Value == ourEntry) continue;
+                if (shownOnly)
+                {
+                    Component other = FindChaControlOf(pair.Value);
+                    if (other != null && !IsCharacterShown(other)) continue;
+                }
+                return true;
+            }
             return false;
         }
 
@@ -4350,6 +4356,13 @@ namespace LiquidWobbleMPB
                 SyncWombStack(w, cc, false);
                 ApplyPenisForWomb(w, cc, true);   // hotkey = an explicit request to wire this pair up
             }
+            // BP learns "this is vaginal" only when a k_f_dan_entry constraint is ADDED. Links the scene already
+            // carried were restored before BP existed, and the load-time re-arm skipped her if she had no womb
+            // then - so without this a womb added now reads no depth for the whole session.
+            System.Func<Component, bool> wearsWomb = her => { string how; return her != null && WombOfWearer(her, out how) != null; };
+            int armed = BPBridge.ReArmVaginalTargets(wearsWomb);
+            if (armed > 0)
+                LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: re-armed BetterPenetration on " + armed + " male(s) for the womb(s) just applied.");
             WombExpandEffect.RequestRepair();   // the hotkey may have added/aimed NC links -> re-pair every womb to its penis now
         }
 
@@ -4363,7 +4376,7 @@ namespace LiquidWobbleMPB
             string how;
             Component wearer = ResolveWearer(w, out how);
             Component pen;
-            Transform end = NearestPenisEnd(scan, target.position, wearer, out pen, target);
+            Transform end = NearestPenisEnd(scan, target.position, wearer, out pen, target, null, true);
             return (pen != null && end != null) ? Vector3.Distance(end.position, target.position) : float.MaxValue;
         }
 
@@ -4807,11 +4820,11 @@ namespace LiquidWobbleMPB
                 if (target == null) { LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "' has no penis_target bone."); return; }
                 var all = UnityEngine.Object.FindObjectsOfType<Transform>();
                 Component penetrator;
-                Transform end = NearestPenisEnd(all, target.position, receiver, out penetrator, target, w.EntranceWorld());   // the OTHER character's penis, if unclaimed
+                Transform end = NearestPenisEnd(all, target.position, receiver, out penetrator, target, w.EntranceWorld(), manual);   // the OTHER character's penis, if unclaimed
                 if (penetrator == null || end == null)
                 {
-                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': no penetrator (a cm_m_dankon character other than the receiver) found.");
-                    if (PenisTakeover) PenisNote = "no penis found near her";
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': no penetrator (a " + (manual ? "shown " : "") + "cm_m_dankon character other than the receiver) found.");
+                    if (PenisTakeover) PenisNote = "no penis on a shown male near her";
                     return;
                 }
                 // Is that nearest penis actually IN this womb? With one male and several females-each-with-a-womb,
@@ -4834,7 +4847,8 @@ namespace LiquidWobbleMPB
                 // that has drifted (a pose change, a scaled penis) reads as "someone else's" and gets
                 // dropped. Another womb's penis can never reach this point - NearestPenisEnd refuses to
                 // return one - so this only ever re-adopts a pair already made here.
-                if (penisDist > PenisWombRange && NodeConstraintBridge.ParentOfChild(end) == target)
+                bool heldHere = NodeConstraintBridge.ParentOfChild(end) == target;
+                if (penisDist > PenisWombRange && heldHere)
                 {
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': '" + penetrator.name + "' is "
                         + penisDist.ToString("F2") + "m from penis_target but THIS womb already holds his tip - keeping the pair.");
@@ -4846,9 +4860,10 @@ namespace LiquidWobbleMPB
                 if (penisDist > PenisWombRange && (bpSaysThisPair || manual || PenisTakeover))
                 {
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': '" + penetrator.name + "' is "
-                        + penisDist.ToString("F2") + "m from penis_target, but BetterPenetration has him bound to '"
-                        + (receiver != null ? receiver.name : "?")
-                        + "' - aiming him at it (the aim link is what brings the penis to the womb).");
+                        + penisDist.ToString("F2") + "m from penis_target, but "
+                        + (bpSaysThisPair ? "BetterPenetration has him bound to '" + (receiver != null ? receiver.name : "?") + "'"
+                                          : "the key was pressed for this pair")
+                        + " - aiming him at it (the aim link is what brings the penis to the womb).");
                     penisDist = 0f;
                 }
                 if (penisDist > PenisWombRange)
@@ -4857,31 +4872,21 @@ namespace LiquidWobbleMPB
                     if (PenisTakeover) PenisNote = "penis SKIPPED - nearest ('" + penetrator.name + "') is " + penisDist.ToString("F2") + "m away, another womb's";
                     return;
                 }
-                // The couple is settled (nearest, in range, not another womb's). If the tip is driven by
-                // something the USER set up - their own sphere, an animation rig, any hand-made link -
-                // LEAVE IT. That aim is deliberate and deleting it would silently break the animation
-                // they built; the hotkey used to release it, which is what this replaces. Everything
-                // else still applies: shaders, stencil pair, window. The link creation further down
-                // already refuses to reassign a node that carries a constraint, so not releasing is the
-                // whole of the change: a competing aim is simply never created.
-                Transform tipHolder = NodeConstraintBridge.ParentOfChild(end);
-                bool aimLeftToUser = tipHolder != null && tipHolder != target && tipHolder.name != "penis_target";
-                if (aimLeftToUser)
-                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: '" + penetrator.name + "' tip is aimed at '"
-                        + tipHolder.name + "' by a constraint of yours - applying shaders only, the aim is left alone.");
+                // The couple is settled (nearest, in range, not another womb's). Whether the tip is re-aimed is
+                // decided with the links below, and the on-screen note reports what that actually did.
                 CapturePenetrator(w, penetrator);   // remember his penis uncensor for a later male replacement
                 Transform entry  = FindChild(penetrator.transform, DanEntryBone);
-                Transform vagina = EntryAnchorFor(w, receiver, entry);
+                Transform vagina = EntryAnchorFor(w, receiver, entry, manual);
                 int st = w.OrganStencil();
                 LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "' -> receiver='" + (receiver != null ? receiver.name : "none") + "' penetrator='" + penetrator.name + "' vagina=" + (vagina != null ? "'" + vagina.name + "'" : "NONE") + " stencil=" + st + ".");
                 // Say WHY he was taken. Claiming a penis moves the scene - the aim link drags him to the
                 // womb - so the gap that decided it belongs on screen, not only in the log.
-                string howClaimed = penisGap <= PenisWombRange
-                    ? "claimed at " + (penisGap * 100f).ToString("F0") + "cm"
-                    : "adopted, already this womb's";
-                if (PenisTakeover) PenisNote = aimLeftToUser
-                    ? "penis targets '" + tipHolder.name + "' - only shaders applied (" + howClaimed + ")"
-                    : "penis x-rayed on '" + penetrator.name + "' (" + howClaimed + ")";
+                string gapCm = (penisGap * 100f).ToString("F0") + "cm";
+                string howClaimed = penisGap <= PenisWombRange ? "claimed at " + gapCm
+                                  : heldHere ? "adopted, already this womb's"
+                                  : bpSaysThisPair ? "BP binds him to her, " + gapCm + " away"
+                                  : "claimed by the key at " + gapCm;
+
                 if (Debug)
                 {
                     // POSITION READOUT: is penis_target actually AT the womb? target<->entrance small = good.
@@ -4913,13 +4918,16 @@ namespace LiquidWobbleMPB
                 }
                 MEBridge.EnsurePenisOrgInside(penetrator, st, true);   // x-ray the penetrator's penis, matched to THIS womb
                 MainGameWomb.DumpBPDanOptions(penetrator);             // log this male's BP DanOptions (harvest for the Free-H override)
+                string aimOutcome = null;   // what the aim links below actually did, for the on-screen note
+                bool entryFailed = false;
                 if (NodeConstraintBridge.Available)
                 {
                     // NEVER reassign a dan node already targeted by hand (wired EITHER direction - e.g. aimed at a hand-made sphere).
                     if (entry != null && vagina != null)
                     {
                         if (NodeConstraintBridge.HasConstraintForNode(entry)) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: k_f_dan_entry already has a constraint -> leaving your target, not reassigning.");
-                        else NodeConstraintBridge.AddPositionLink(vagina, entry, "");   // empty alias -> shows raw "parent -> child" like a manual one
+                        else if (!NodeConstraintBridge.AddPositionLink(vagina, entry, ""))   // empty alias -> shows raw "parent -> child" like a manual one
+                            entryFailed = true;
                     }
                     // AIM TAKEOVER (2026-08-26). A dan_end already constrained to one of HER BONES is an
                     // auto-aim - the game's, BP's, or a leftover - and the womb is a better target for it, so it is
@@ -4929,9 +4937,12 @@ namespace LiquidWobbleMPB
                     if (driver == null)
                     {
                         if (NodeConstraintBridge.HasConstraintForNode(end))
+                        {
+                            aimOutcome = "tip left alone (it drives another link)";
                             LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: k_f_dan_end drives someone else's constraint -> leaving it alone.");
-                        else
-                            NodeConstraintBridge.AddPositionLink(target, end, "");
+                        }
+                        else if (!NodeConstraintBridge.AddPositionLink(target, end, ""))
+                            aimOutcome = "aim link could not be added";
                     }
                     else if (driver == target)
                     {
@@ -4950,18 +4961,38 @@ namespace LiquidWobbleMPB
                             string what = ownerOci == null ? "something Studio does not own"
                                         : ownerCc != null ? "a male's bone"
                                         : "'" + (ownerOci.treeNodeObject != null ? ownerOci.treeNodeObject.textName : ownerOci.GetType().Name) + "' - your own object";
+                            aimOutcome = "tip left on '" + driver.name + "' (your own aim)";
                             LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: k_f_dan_end is aimed at '" + driver.name
                                 + "' (" + what + ") -> leaving your target, not reassigning.");
                         }
                         else if (NodeConstraintBridge.RemoveDriverOf(end))
                         {
-                            NodeConstraintBridge.AddPositionLink(target, end, "");
-                            LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: TOOK OVER the aim on k_f_dan_end - was '" + driver.name
-                                + "', a bone of '" + ownerCc.name + "' (her own rig = an auto-aim), now this womb's penis_target.");
+                            if (NodeConstraintBridge.AddPositionLink(target, end, ""))
+                            {
+                                aimOutcome = "aim taken over from her '" + driver.name + "'";
+                                LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: TOOK OVER the aim on k_f_dan_end - was '" + driver.name
+                                    + "', a bone of '" + ownerCc.name + "' (her own rig = an auto-aim), now this womb's penis_target.");
+                            }
+                            else aimOutcome = "released from her '" + driver.name + "' but the new aim link failed";
                         }
+                        else aimOutcome = "aim on '" + driver.name + "' could not be taken over";
                     }
                 }
-                else LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: NodesConstraints not present -> penis x-rayed but not aimed.");
+                else
+                {
+                    aimOutcome = "not aimed (NodesConstraints missing)";
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: NodesConstraints not present -> penis x-rayed but not aimed.");
+                }
+                if (entryFailed) aimOutcome = "entry link could not be added" + (aimOutcome != null ? ", " + aimOutcome : "");
+                // Ctrl+Shift+W only, and only once THIS womb drives the tip: a KKPE bend would keep the penis off its
+                // target. An aim left on the user's own object is the user's pose, bends included.
+                if (PenisTakeover && NodeConstraintBridge.Available && NodeConstraintBridge.DriverOf(end) == target)
+                {
+                    string kkpe = ClearKkpeAimEdits(penetrator);
+                    if (kkpe != null) aimOutcome = aimOutcome != null ? aimOutcome + ", " + kkpe : kkpe;
+                }
+                if (PenisTakeover) PenisNote = "penis x-rayed on '" + penetrator.name + "' (" + howClaimed + ")"
+                                             + (aimOutcome != null ? ", " + aimOutcome : "");
             }
             catch (System.Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: penis-for-womb failed on '" + (w != null ? w.name : "?") + "': " + e.Message); }
             finally { if (!hadUpgrade) MEBridge.UpgradeStack = false; }
@@ -4986,7 +5017,7 @@ namespace LiquidWobbleMPB
         // A crowded scene reported "no penetrator found" for three wombs after a scene LOAD that had
         // paired fine on the hotkey press, and the reasons were invisible - which is what made it a
         // guess. Nothing here changes a decision; it only says out loud which one was taken.
-        private static Transform NearestPenisEnd(Transform[] all, Vector3 pos, Component exclude, out Component owner, Transform myTarget = null, Vector3? mouth = null)
+        private static Transform NearestPenisEnd(Transform[] all, Vector3 pos, Component exclude, out Component owner, Transform myTarget = null, Vector3? mouth = null, bool shownOnly = false)
         {
             Transform best = null; float bsq = float.MaxValue; owner = null;
             var dbg = (Debug && myTarget != null) ? new System.Text.StringBuilder() : null;
@@ -5007,6 +5038,7 @@ namespace LiquidWobbleMPB
                 string who = cc != null ? cc.name : "?";
                 if (cc == null) { if (dbg != null) dbg.AppendLine().Append("   REJECT (no ChaControl above it)"); continue; }
                 if (cc == exclude) { if (dbg != null) dbg.AppendLine().Append("   ").Append(who).Append(": REJECT - is the receiver herself"); continue; }
+                if (shownOnly && !IsCharacterShown(cc)) { if (dbg != null) dbg.AppendLine().Append("   ").Append(who).Append(": REJECT - character is hidden"); continue; }
                 if (!MEBridge.HasPenisMaterial(cc)) { if (dbg != null) dbg.AppendLine().Append("   ").Append(who).Append(": REJECT - no cm_m_dankon material"); continue; }
                 float dist = (t.position - pos).magnitude;
                 string dists = "toTarget=" + (dist * 1000f).ToString("F0") + "mm"
@@ -5059,6 +5091,132 @@ namespace LiquidWobbleMPB
         {
             for (var c = t; c != null; c = c.parent) { var cc = c.GetComponent("ChaControl"); if (cc != null) return cc; }
             return null;
+        }
+
+        // Is the CHARACTER shown - not his penis, which the key press unhides itself. ChaControl.visibleAll is
+        // the character-level flag (BetterPenetration's CoreGame and MoreAccessories key on it); a root switched
+        // off entirely counts as hidden too.
+        private static bool IsCharacterShown(Component cc)
+        {
+            var ch = cc as ChaControl;
+            return ch != null && ch.gameObject.activeInHierarchy && ch.visibleAll;
+        }
+
+        // KKPE BENDS ON THE PENIS. KKPE (KKPE.dll / KKSPE.dll, namespace HSPE) re-applies every saved bone
+        // edit after IK, i.e. after BetterPenetration has posed the shaft, so a saved rotation or position on a
+        // bone BP poses wins every frame: the penis points away from its target even with its end node sitting
+        // exactly on penis_target. Ctrl+Shift+W clears those edits through KKPE's own ResetBoneRot /
+        // ResetBonePos (what its reset buttons call), so KKPE's saved data stays consistent. Scale edits are
+        // the penis's size and are kept. Reflection, soft dependency: without KKPE there is nothing to clear.
+        private static readonly string[] KkpeAimBones =
+        {
+            // BP's BoneNames.DanBones + BPDanEnd + VirtualDanBones - DanPoints.AimDanPoints writes each one's
+            // world position and rotation every frame.
+            "cm_J_dan101_00", "cm_J_dan102_00", "cm_J_dan103_00", "cm_J_dan104_00", "cm_J_dan105_00",
+            "cm_J_dan106_00", "cm_J_dan107_00", "cm_J_dan108_00", "cm_J_dan109_00", "cm_J_dan119_00",
+            "cm_J_vdan102_00", "cm_J_vdan104_00", "cm_J_vdan106_00", "cm_J_vdan108_00",
+            // the two nodes the key links to the womb
+            DanEntryBone, "k_f_dan_end",
+        };
+        private static bool _kkpeTried, _kkpeBroken;
+        private static Type _kkpePoseCtrl;
+        private static FieldInfo _kkpeBonesEditor, _kkpeDirtyBones, _kkpeRot, _kkpePos;
+        private static PropertyInfo _kkpeRotHas, _kkpePosHas;
+        private static MethodInfo _kkpeResetRot, _kkpeResetPos;
+
+        private static bool KkpeReady()
+        {
+            if (!_kkpeTried)
+            {
+                _kkpeTried = true;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    Type t = null;
+                    try { t = asm.GetType("HSPE.PoseController", false); } catch { }
+                    if (t != null) { _kkpePoseCtrl = t; break; }
+                }
+                if (_kkpePoseCtrl != null)
+                {
+                    const BindingFlags bf = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                    _kkpeBonesEditor = _kkpePoseCtrl.GetField("_bonesEditor", bf);
+                    Type editor = _kkpeBonesEditor != null ? _kkpeBonesEditor.FieldType : null;
+                    Type data = editor != null ? editor.GetNestedType("TransformData", BindingFlags.NonPublic | BindingFlags.Public) : null;
+                    _kkpeDirtyBones = editor != null ? editor.GetField("_dirtyBones", bf) : null;
+                    _kkpeRot = data != null ? data.GetField("rotation", bf) : null;
+                    _kkpePos = data != null ? data.GetField("position", bf) : null;
+                    _kkpeRotHas = _kkpeRot != null ? _kkpeRot.FieldType.GetProperty("hasValue", bf) : null;
+                    _kkpePosHas = _kkpePos != null ? _kkpePos.FieldType.GetProperty("hasValue", bf) : null;
+                    var sig = new[] { typeof(Transform), typeof(Transform), typeof(bool), typeof(int) };
+                    _kkpeResetRot = editor != null ? editor.GetMethod("ResetBoneRot", bf, null, sig, null) : null;
+                    _kkpeResetPos = editor != null ? editor.GetMethod("ResetBonePos", bf, null, sig, null) : null;
+                    _kkpeBroken = _kkpeDirtyBones == null || _kkpeRotHas == null || _kkpePosHas == null || _kkpeResetRot == null || _kkpeResetPos == null;
+                    if (_kkpeBroken)
+                        LiquidWobbleMPBPlugin._logger?.LogError("CloXray: KKPE is installed but its bone editor is not the one CloXray knows (bonesEditor="
+                            + (_kkpeBonesEditor != null) + " dirtyBones=" + (_kkpeDirtyBones != null) + " hasValue=" + (_kkpeRotHas != null && _kkpePosHas != null)
+                            + " resetRot=" + (_kkpeResetRot != null) + " resetPos=" + (_kkpeResetPos != null)
+                            + ") - a penis bend saved in KKPE will NOT be cleared by the key.");
+                }
+            }
+            return _kkpePoseCtrl != null && !_kkpeBroken;
+        }
+
+        // Clears KKPE rotation/position edits on `male`'s aim bones. Returns the on-screen fragment, or null when
+        // there was nothing to clear. Every bone touched is named in the log.
+        private static string ClearKkpeAimEdits(Component male)
+        {
+            if (male == null || !KkpeReady()) return null;
+            try
+            {
+                var oci = OciCharFor(male);
+                Transform host = (oci != null && oci.guideObject != null) ? oci.guideObject.transformTarget : null;
+                Component pose = host != null ? host.GetComponent(_kkpePoseCtrl) : null;
+                if (pose == null) return null;   // KKPE never handled this character: it holds no edits
+                object editor = _kkpeBonesEditor.GetValue(pose);
+                var dirty = editor != null ? _kkpeDirtyBones.GetValue(editor) as System.Collections.IDictionary : null;
+                if (dirty == null || dirty.Count == 0) return null;
+
+                var byName = new Dictionary<string, Transform>();
+                foreach (var t in male.GetComponentsInChildren<Transform>(true))
+                    if (t != null && !byName.ContainsKey(t.name)) byName[t.name] = t;
+
+                var cleared = new List<string>();
+                var kept = new List<string>();
+                foreach (string name in KkpeAimBones)
+                {
+                    Transform bone;
+                    if (!byName.TryGetValue(name, out bone) || !dirty.Contains(bone.gameObject)) continue;
+                    object data = dirty[bone.gameObject];
+                    bool rot = (bool)_kkpeRotHas.GetValue(_kkpeRot.GetValue(data), null);
+                    bool pos = (bool)_kkpePosHas.GetValue(_kkpePos.GetValue(data), null);
+                    if (!rot && !pos) continue;   // a scale edit only: the penis's size, kept
+                    if (rot) _kkpeResetRot.Invoke(editor, new object[] { bone, null, false, 0 });
+                    if (pos) _kkpeResetPos.Invoke(editor, new object[] { bone, null, false, 0 });
+                    // KKPE refuses to reset a rotation Studio FK drives - report what actually changed.
+                    object after = dirty.Contains(bone.gameObject) ? dirty[bone.gameObject] : null;
+                    bool rotLeft = after != null && (bool)_kkpeRotHas.GetValue(_kkpeRot.GetValue(after), null);
+                    bool posLeft = after != null && (bool)_kkpePosHas.GetValue(_kkpePos.GetValue(after), null);
+                    var parts = new List<string>();
+                    if (rot && !rotLeft) parts.Add("rotation");
+                    if (pos && !posLeft) parts.Add("position");
+                    if (parts.Count > 0) cleared.Add(name + " (" + string.Join("+", parts.ToArray()) + ")");
+                    if ((rot && rotLeft) || (pos && posLeft)) kept.Add(name);
+                }
+                if (cleared.Count > 0)
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: cleared KKPE edits that fought BetterPenetration on '" + male.name
+                        + "': " + string.Join(", ", cleared.ToArray()) + ". Scale edits kept.");
+                if (kept.Count > 0)
+                    LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: KKPE kept its edit on '" + male.name + "' " + string.Join(", ", kept.ToArray())
+                        + " - Studio FK drives that bone, so KKPE will not reset it. Turn FK off on the penis to let BetterPenetration aim it.");
+                if (cleared.Count == 0 && kept.Count == 0) return null;
+                string note = cleared.Count > 0 ? "KKPE bend cleared (" + cleared.Count + " bone" + (cleared.Count == 1 ? "" : "s") + ")" : null;
+                if (kept.Count > 0) note = (note != null ? note + ", " : "") + "KKPE bend kept on " + kept.Count + " FK bone" + (kept.Count == 1 ? "" : "s");
+                return note;
+            }
+            catch (Exception e)
+            {
+                LiquidWobbleMPBPlugin._logger?.LogError("CloXray: clearing the KKPE edits on '" + male.name + "' penis bones failed - nothing more was changed: " + e);
+                return "KKPE bend NOT cleared (see log)";
+            }
         }
 
         // Nearest character (ChaControl) to a world point, within maxRange. Walks up to the ChaControl via

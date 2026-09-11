@@ -510,7 +510,7 @@ namespace LiquidWobbleMPB
         // calibrated in BP units, so the geometry path converts into them rather than using canal
         // fractions of its own - otherwise one StretchStart would mean two different places.
         private const float GeomMouthOffset = 0.01046f;   // metres, BP zero -> canal mouth
-        private float _engHold, _engDepth;
+        private float _engHold, _engDepth, _engGirth = 1f;
         private bool  _traceGrace;
         private float _cleanPrev = float.NaN;                          // for the velocity estimate
         private float _traceClean, _traceLead, _traceRingLead;         // trace only
@@ -1537,6 +1537,9 @@ namespace LiquidWobbleMPB
         private bool _offCanalWarned;
         private bool _entryOffWarned;   // said once per womb      // the paired penis runs beside the canal, not through it
         private bool _canalMarkerWarned;   // the canal marker disagreed with the mesh and was dropped
+        private const float CanalMeasureGrace = 2f;  // seconds a fresh womb gets to produce its first canal bake
+        private float _canalWaitSince = -1f;         // when the canal was first seen unmeasured; -1 while measured
+        private bool _canalUnmeasuredWarned;         // the never-measured error has been logged for this womb
         private bool _canalRejectWarned;
         private void ReportCanalRejected(float measured, float scale)
         {
@@ -1567,6 +1570,22 @@ namespace LiquidWobbleMPB
                 if (_canalBandW == null || _canalBandW.Length != _canalLocal.Length) _canalBandW = new Vector3[_canalLocal.Length];
                 for (int i = 0; i < _canalLocal.Length; i++) _canalBandW[i] = _smr.transform.TransformPoint(_canalLocal[i]);
             }
+            if (_canalLocal == null)
+            {
+                // A fresh womb needs a few frames for its first canal bake, and the marker bone is looked up by
+                // that bake - so neither is missing yet, only unmeasured. Report it only if it stays that way.
+                if (_canalWaitSince < 0f) _canalWaitSince = Time.unscaledTime;
+                if (Time.unscaledTime - _canalWaitSince < CanalMeasureGrace) return;
+                if (!_canalUnmeasuredWarned)
+                {
+                    _canalUnmeasuredWarned = true;
+                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: womb '" + name + "' still has no canal measurement "
+                        + CanalMeasureGrace.ToString("F0") + "s after it appeared - the bake keeps failing or reads an implausible "
+                        + "length, so nothing is driven. Respawn the womb, or check that its mesh is intact.");
+                }
+                return;
+            }
+            _canalWaitSince = -1f;
             if (_canalBone == null)
             {
                 if (!_canalMarkerWarned)
@@ -1783,7 +1802,11 @@ namespace LiquidWobbleMPB
         // slack. Nor may sensitivity widen a REJECTION: at sens=2 the shaft width reaches 90mm, which
         // stops rejecting both the measured 50mm-off tip and the 80mm-away neighbouring womb these
         // vetoes exist for. sens may only tighten, which is the designed display-womb behaviour.
-        private float CanalTipHalfWidth() { return (Mathf.Max(_bp.girthTip, 0.005f) + 0.010f) * Mathf.Min(_sens, 1f); }
+        // Never narrower than 30mm: tip thickness plus 10mm alone gives a thin tip only about 22mm, which leaves
+        // little room for a tip slightly off the centre line. 30mm still rejects a tip 50mm off the axis and a
+        // neighbouring womb 80mm away.
+        private float CanalTipHalfWidth() { return Mathf.Max(Mathf.Max(_bp.girthTip, 0.005f) + 0.010f, CanalTipMinHalfWidth) * Mathf.Min(_sens, 1f); }
+        private const float CanalTipMinHalfWidth = 0.030f;
 
         private float WombBulbRadius()
         {
@@ -2365,10 +2388,12 @@ namespace LiquidWobbleMPB
                             insertion = pen.magnitude;
                         }
                     }
-                    LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: womb '" + WombTag() + "' is engaged with the tip "
-                        + (_bpLateral * 1000f).ToString("F1") + "mm off the canal centreline - inside the mesh-bounds gate ("
-                        + (latGate * 1000f).ToString("F1") + "mm) but OUTSIDE the canal tube ("
-                        + (canalGate * 1000f).ToString("F1") + "mm)."
+                    LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: womb '" + WombTag() + "' is engaged with its "
+                        + (realIn ? "deepest shaft point " : aimedIn ? "aimed tip " : "closest shaft bone ")
+                        + (_bpLateral * 1000f).ToString("F1") + "mm off the canal centreline, outside the canal tube ("
+                        + (canalGate * 1000f).ToString("F1") + "mm) - engaged through "
+                        + (contained ? "containment (shaft allowance " + (CanalHalfWidth() * 1000f).ToString("F1") + "mm)"
+                                     : "the vagina pairing (gate " + (latGate * 1000f).ToString("F1") + "mm)") + "."
                         + " male='" + (_bp.srcName ?? "?") + "'"
                         + " tipPos=" + _bp.tipPos.ToString("F3")
                         + " entrance=" + _canalEntrance.ToString("F3")
@@ -2389,7 +2414,7 @@ namespace LiquidWobbleMPB
                         + " canalBone=" + (CanalEntryBone != null ? CanalEntryBone.position.ToString("F3") : "MISSING")
                         + " boneVsDerived=" + (CanalEntryBone != null
                             ? ((CanalEntryBone.position - _canalEntrance).magnitude * 1000f).ToString("F1") + "mm" : "?")
-                        + " (tipLatDirect is the TIP itself; _bpLateral is the deepest SHAFT point)");
+                        + " (tipLatDirect is the TIP itself)");
                 }
                 _wasEngaged = gateOpen;
                 if (gateOpen)
@@ -2762,12 +2787,10 @@ namespace LiquidWobbleMPB
                         // times EngageEps, so gating insertion on cdepth would pass a toy merely resting
                         // against the orifice.
                         float cfrac  = cdrive / _canalLen;
-                        float cdepth = cfrac;
-                        if (MainGameWomb.IsStudio)
-                        {
-                            float cUnit = Mathf.Max(RefDanLength * FullDepthIn * CanalScaleY(), 1e-6f);
-                            cdepth = (cdrive + GeomMouthOffset) / cUnit;
-                        }
+                        float cUnit  = Mathf.Max(RefDanLength * FullDepthIn * CanalScaleY(), 1e-6f);
+                        float penisFrac = (targetNorm > 0f && MainGameWomb.IsStudio && _canalLen > 1e-6f)
+                                        ? (targetNorm * cUnit - GeomMouthOffset) / _canalLen
+                                        : targetNorm;
                         _colLateral = clat; _colName = cname;
                         // TOY-GEOM. Depth here is a projection along the canal, and a projection says how
                         // far ALONG, never whether it is IN - the same thing that made the old penis
@@ -2782,27 +2805,27 @@ namespace LiquidWobbleMPB
                                 + "' along=" + (cdrive * 1000f).ToString("F1") + "mm lateral="
                                 + (clat * 1000f).ToString("F1") + "mm radius=" + (crad * 1000f).ToString("F1")
                                 + "mm canal=" + (_canalLen * 1000f).ToString("F1") + "mm -> canalFrac "
-                                + cfrac.ToString("F3") + " depth "
-                                + cdepth.ToString("F3") + (MainGameWomb.IsStudio ? " (BP units)" : "") + " (lateral gate is "
+                                + cfrac.ToString("F3") + " penisClaim "
+                                + penisFrac.ToString("F3") + " (canal fractions) (lateral gate is "
                                 + (LiquidWobbleMPBPlugin.CfgColliderInCanal * 1000f).ToString("F0") + "mm)");
                         }
                         // A toy that IS in the canal but reads shallower than the penis path loses, and the
                         // penis path then keeps the womb open on a depth that may have nothing to do with
                         // this womb. That is the one case worth naming, so it is reported.
-                        if (cdepth <= targetNorm && cfrac > EngageEps
+                        if (cfrac <= penisFrac && cfrac > EngageEps
                             && LiquidWobbleMPBPlugin.CfgDebugLog && Time.unscaledTime >= _colSkipLogNext)
                         {
                             _colSkipLogNext = Time.unscaledTime + 2f;
                             LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: womb '" + name + "' - toy '"
-                                + (cname ?? "?") + "' reads depth " + cdepth.ToString("F3")
-                                + " but the penis path already claims " + targetNorm.ToString("F3")
+                                + (cname ?? "?") + "' reads depth " + cfrac.ToString("F3")
+                                + " but the penis path already claims " + penisFrac.ToString("F3")
                                 + ", so the toy does NOT drive this womb.");
                         }
-                        if (cfrac > EngageEps && cdepth > targetNorm)   // only take over when the toy reaches DEEPER than the penis
+                        if (cfrac > EngageEps && cfrac > penisFrac)   // only take over when the toy reaches DEEPER than the penis
                         {
                             engaged    = true;
                             _traceSrc  = "TOY:" + (cname ?? "?");
-                            targetNorm = cdepth;
+                            targetNorm = cfrac;
                             girthScale = Mathf.Clamp(GirthForOpening(crad), 0.4f, MaxGirthScale);   // same womb-scale term as the penis path
                             // Per-ring radii are a STUDIO feature: in H the colliders slide with the
                             // hips in bent poses (reverse cowgirl), and the "thickest collider at this
@@ -2810,7 +2833,7 @@ namespace LiquidWobbleMPB
                             // open at random. H uses the stable uniform tip girth instead.
                             _colPerRing = MainGameWomb.IsStudio;   // _colRingRadius[] holds the per-ring thickest collider -> ring loop uses it
                             _bp = new BPBridge.Reading {
-                                found = true, depth = cdepth, visualDepth = cdepth,
+                                found = true, depth = cfrac, visualDepth = cfrac,
                                 girthBase = crad, girthTip = crad, girthFactor = 1f, baseLen = 0f,
                                 tipPos = ctip,
                                 tipDir = (ctip - cbase).sqrMagnitude > 1e-8f ? (ctip - cbase).normalized : Vector3.up,
@@ -3001,10 +3024,13 @@ namespace LiquidWobbleMPB
             _traceGrace = false;
             if (MainGameWomb.IsStudio)
             {
-                if (engaged) { _engHold = Time.unscaledTime + EngageGrace; _engDepth = targetNorm; }
+                // Girth is held together with the depth, the same pair the Free-H hold above carries. Holding
+                // the depth alone would re-engage the womb on a girthScale already back at its neutral 1.0, and a
+                // toy leaving the canal would then widen the rings instead of letting them close.
+                if (engaged) { _engHold = Time.unscaledTime + EngageGrace; _engDepth = targetNorm; _engGirth = girthScale; }
                 else if (Time.unscaledTime < _engHold)
                 {
-                    engaged = true; targetNorm = _engDepth; _traceGrace = true;
+                    engaged = true; targetNorm = _engDepth; girthScale = _engGirth; _traceGrace = true;
                 }
             }
             float tgtDepth = engaged ? targetNorm : 0f;
