@@ -33,6 +33,10 @@ namespace LiquidWobbleMPB
         // unrelated vanilla item in the live game. Studio's own item table is the authority.
         private const string WombBundlePath = "studio/clo/clo_xraywomb.unity3d";
         private const string WombFileName   = "clo_xraywomb";
+        // THE ANAL WOMB is item 2 - the one without ovaries - with its uterus collapsed by `remove_womb`, which
+        // leaves the plain canal an anus is. It hangs in her a_n_ana point, the anal twin of a_n_kokan.
+        private const string AnalBundlePath  = "studio/clo/clo_xraywomb2.unity3d";
+        private const string AnalFileName    = "clo_xraywomb2";
 
         // Where each girl sits in the cycle: instance id -> index into Pairs. Absent = nothing applied
         // by this hotkey yet. Session state only; a saved scene carries the RESULT (her ME-persisted
@@ -48,21 +52,41 @@ namespace LiquidWobbleMPB
             LiquidWobbleMPBPlugin._log?.LogMessage("CloXray: " + s);
         }
 
-        internal static void Trigger()
+        /// ONE HOLE PER PRESS. The pair key sets up the womb on her VAGINA, the anal key the one at her ANUS, and
+        /// any other womb - one she wears somewhere else, or one standing on its own in the scene - is set up by
+        /// SELECTING that womb and pressing the pair key. Nothing else in the scene is touched either way.
+        internal static void Trigger(bool anal = false)
         {
             if (!LiquidWobbleMPBPlugin.CfgEnabled || !MainGameWomb.IsStudio) return;
+
+            // A WOMB ITEM in the selection means that womb and no other. Her orifices say nothing about where it
+            // sits, so the penis aimed nearest its aim bone is the one meant for it.
+            if (!anal)
+            {
+                WombExpandEffect picked = SelectedWomb();
+                if (picked != null) { ApplyToWomb(picked); return; }
+            }
 
             Component girl = SelectedFemale();
             if (girl == null)
             {
-                Say("select a female character first, then press the pair hotkey.");
+                Say(anal ? "select a female character first, then press the anal womb hotkey."
+                         : "select a female character - or one womb item - first, then press the pair hotkey.");
                 return;
             }
 
-            var herWombs = WombsFor(girl);
+            WombExpandEffect hers = HerWomb(girl, anal);
             int key = girl.GetInstanceID();
             int step;
-            if (!_step.TryGetValue(key, out step))
+            if (anal)
+            {
+                // The anal key never walks the stencil cycle - her pair belongs to her body and the pair key owns
+                // it. It adopts whatever she is on, so both her wombs show through the same window.
+                step = HerPairIndex(girl);
+                if (step < 0) step = FirstFreePairIndex(girl);
+                if (step < 0) step = 0;
+            }
+            else if (!_step.TryGetValue(key, out step))
             {
                 // _step is per SESSION, so after a scene load every girl reads as a first press even
                 // though the scene already gave her a pair. ADOPT that pair rather than hunting for a
@@ -98,15 +122,15 @@ namespace LiquidWobbleMPB
                 }
             }
 
-            if (herWombs.Count == 0)
+            if (hers == null)
             {
                 // A freshly added item has no WombExpandEffect yet: it is attached from the baked
                 // component's Start(), which Unity runs on the NEXT frame. Add now, finish in Tick().
-                var oci = AddWombFor(girl);
+                var oci = AddWombFor(girl, anal);
                 if (oci == null) return;   // AddWombFor logged the reason; nothing applied (no fallback)
-                _pendingItem = oci; _pendingGirl = girl; _pendingPair = step;
+                _pendingItem = oci; _pendingGirl = girl; _pendingPair = step; _pendingAnal = anal;
                 _pendingUntil = Time.unscaledTime + 3f;
-                Say("adding a womb for '" + girl.name + "'...");
+                Say("adding " + (anal ? "an anal womb" : "a womb") + " for '" + girl.name + "'...");
                 return;
             }
 
@@ -115,25 +139,19 @@ namespace LiquidWobbleMPB
                 Say("could not set the stencil pair on '" + girl.name + "'s womb - see the log.");
                 return;
             }
-            _step[key] = step;
+            if (!anal) _step[key] = step;
 
-            // Takeover: this key promises a finished setup, so a penis held by a stray hand-made
-            // constraint is claimed rather than skipped (other wombs' penises stay untouchable).
-            AutoBodyReveal.PenisNote = null; AutoBodyReveal.PenisUpgraded = false;
-            AutoBodyReveal.PenisTakeover = true;
-            MEBridge.UpgradeStack = true;   // this key opts the character into the sub-2500 stack
-            try { AutoBodyReveal.ApplyAll(); }   // the shipped apply path: stamps her body, x-rays and aims the penis
-            finally { AutoBodyReveal.PenisTakeover = false; MEBridge.UpgradeStack = false; }
-            Say("'" + girl.name + "' -> pair " + (step + 1) + " of " + Pairs.Length
+            ApplyWithNote(girl, hers, false);
+            Say("'" + girl.name + "' -> " + (anal ? "anal womb, " : "") + "pair " + (step + 1) + " of " + Pairs.Length
                 + " (stencil " + Pairs[step] + "/" + (Pairs[step] + 1) + ")"
                 + (AutoBodyReveal.PenisNote != null ? ", " + AutoBodyReveal.PenisNote : "")
                 + (AutoBodyReveal.PenisUpgraded ? ", old single-material penis UPGRADED" : "")
-                + ". Press again for the next pair.");
+                + (anal ? ". Her pair belongs to the pair hotkey." : ". Press again for the next pair."));
         }
 
         // A womb just requested from Studio, waiting for its own component to come up.
         private static Studio.ObjectCtrlInfo _pendingItem, _pendingParent; private static Component _pendingGirl;
-        private static int _pendingPair; private static float _pendingUntil;
+        private static int _pendingPair; private static float _pendingUntil; private static bool _pendingAnal;
 
         /// Called every Studio frame. Finishes an add started by Trigger() as soon as the item's
         /// WombExpandEffect exists - normally the very next frame, since the baked component attaches
@@ -156,6 +174,21 @@ namespace LiquidWobbleMPB
                 _pendingItem = null; _pendingGirl = null; _pendingParent = null;
                 return;
             }
+            // THE COMPONENT EXISTING IS NOT THE WOMB BEING READY. EnsureWombExpand above adds it on the spot, and its
+            // Start() - which finds the mesh - runs a frame later. Finishing on that first frame read a womb with no
+            // mesh: remove_womb "not on this womb" and no clo_canal_entry, so the anal key left the uterus up and
+            // never anchored the penis entry - the log showed the setup finishing before the womb reported ready. A vaginal womb
+            // hid it, because its entry anchor is HER bone rather than the womb's own marker.
+            if (!w.Ready)
+            {
+                if (Time.unscaledTime < _pendingUntil) return;              // Start() has not run yet
+                LiquidWobbleMPBPlugin._logger?.LogError("CloXray: the new womb never finished starting (its mesh was not"
+                    + " resolved - see the WombExpandEffect error above) - removing it rather than leaving a half-made womb.");
+                DeleteNode(_pendingItem);
+                Say("could not add a womb - see the log.");
+                _pendingItem = null; _pendingGirl = null; _pendingParent = null;
+                return;
+            }
 
             // Nest her womb under her now that Studio has finished registering the node, then zero
             // the LOCAL transform - in that order, since a re-parent preserves world position.
@@ -165,10 +198,11 @@ namespace LiquidWobbleMPB
                 // open the parent node, then refresh the workspace. A bare SetParent leaves the node
                 // at the tree root, so the trailing two calls are not cosmetic.
                 var wombNode = _pendingItem.treeNodeObject;
-                var parentNode = FindAttachPoint(_pendingParent as Studio.OCIChar);
+                string slot = _pendingAnal ? AnalPointKey : AttachPointKey;
+                var parentNode = FindAttachPoint(_pendingParent as Studio.OCIChar, slot);
                 if (parentNode == null)
                 {
-                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: '" + AttachPointKey
+                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: '" + slot
                         + "' is not among her attach points - leaving the womb where it is.");
                     parentNode = _pendingParent.treeNodeObject;   // logs the refusal below, changes nothing
                 }
@@ -191,26 +225,55 @@ namespace LiquidWobbleMPB
             // into attach-point space, which would otherwise leave a bogus offset and rotation.
             if (_pendingItem.guideObject != null)
             {
-                _pendingItem.guideObject.changeAmount.pos = Vector3.zero;
+                _pendingItem.guideObject.changeAmount.pos = _pendingAnal ? Vector3.zero : VaginalSpawnPos;
                 _pendingItem.guideObject.changeAmount.rot = Vector3.zero;
             }
 
-            var girl = _pendingGirl; int step = _pendingPair;
-            _pendingItem = null; _pendingGirl = null; _pendingParent = null;
+            var girl = _pendingGirl; int step = _pendingPair; bool anal = _pendingAnal;
+            _pendingItem = null; _pendingGirl = null; _pendingParent = null; _pendingAnal = false;
             if (girl == null) return;
+            if (anal)
+            {
+                EnsureCollapsed(w);
+                // THE ONE THING THE ANAL KEY RELIES ON: the womb it just added has to read as being in her
+                // a_n_ana point, because that - and only that - is how the next press recognises it. If the
+                // attach did not take, say so here rather than let every press quietly add another womb.
+                if (!AutoBodyReveal.InAccessorySlot(w, AnalPointKey, girl))
+                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: the new anal womb is NOT in '" + girl.name
+                        + "'s " + AnalPointKey + " point after the attach, so the next press would add another one."
+                        + " Attach it to her " + AnalPointKey + " by hand, or delete it and check the log above for"
+                        + " why Studio refused the nesting.");
+            }
             if (!SetPairAll(girl, Pairs[step], w)) { Say("could not set the stencil pair - see the log."); return; }
-            _step[girl.GetInstanceID()] = step;
-            AutoBodyReveal.PenisNote = null; AutoBodyReveal.PenisUpgraded = false;
-            AutoBodyReveal.PenisTakeover = true;
-            MEBridge.UpgradeStack = true;   // this key opts the character into the sub-2500 stack
-            try { AutoBodyReveal.ApplyAll(); }
-            finally { AutoBodyReveal.PenisTakeover = false; MEBridge.UpgradeStack = false; }
-            Say("'" + girl.name + "' -> womb added, pair " + (step + 1) + " of " + Pairs.Length
+            if (!anal) _step[girl.GetInstanceID()] = step;
+            ApplyWithNote(girl, w, false);
+            Say("'" + girl.name + "' -> " + (anal ? "anal womb added, " : "womb added, ") + "pair " + (step + 1) + " of " + Pairs.Length
                 + " (stencil " + Pairs[step] + "/" + (Pairs[step] + 1) + ")"
                 + (SharedPair(girl, step) ? " SHARED - windows can bleed where they overlap" : "")
                 + (AutoBodyReveal.PenisNote != null ? ", " + AutoBodyReveal.PenisNote : "")
                 + (AutoBodyReveal.PenisUpgraded ? ", old single-material penis UPGRADED" : "")
-                + ". Press again for the next pair.");
+                + (anal ? ". Her pair belongs to the pair hotkey." : ". Press again for the next pair."));
+        }
+
+        /// An anus is a canal, not a uterus, so the anal key collapses the dome on the womb IT ADDS - and only on
+        /// that one. A womb already at her anus is the author's, shaped how they shaped it, and the key leaves it
+        /// alone - the key's job there is to add a womb at her anus when she has none, not to reshape one she has.
+        /// Only item 2 carries the channel; on anything else it says so rather than leaving a silent uterus there.
+        private static void EnsureCollapsed(WombExpandEffect w)
+        {
+            if (w == null) return;
+            float cur = w.HandShape(WombExpandEffect.CollapseShape);
+            if (cur < 0f)
+            {
+                LiquidWobbleMPBPlugin._logger?.LogError("CloXray: womb '" + w.name + "' has no '"
+                    + WombExpandEffect.CollapseShape + "' channel, so its uterus stays where her anus is. That channel"
+                    + " is on Xray Womb 2 - use that item for her anus, or update [Clo]XrayWomb1.zipmod.");
+                return;
+            }
+            if (cur >= 99f) return;
+            if (w.SetHandShape(WombExpandEffect.CollapseShape, 100f))
+                LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: womb '" + w.name + "' is her anal womb - collapsed its uterus ("
+                    + WombExpandEffect.CollapseShape + " was " + cur.ToString("F0") + ", now 100).");
         }
 
 
@@ -225,6 +288,8 @@ namespace LiquidWobbleMPB
         // (their node has enableAddChild=false); items attach to one of the ACCESSORY POINT
         // nodes Studio builds underneath them.
         private const string AttachPointKey = "a_n_kokan";   // the crotch point ("Group: Crotch"); a_n_waist rides the hips
+        private const string AnalPointKey   = "a_n_ana";     // her anus point, where the anal womb hangs
+        private static readonly Vector3 VaginalSpawnPos = new Vector3(0f, 0f, 0.005f);   // Studio position of a new vaginal womb in a_n_kokan (+Z = her front)
         private static Component SelectedFemale()
         {
             _selectedOci = null;
@@ -241,6 +306,103 @@ namespace LiquidWobbleMPB
             }
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: reading the Studio selection failed: " + e.Message); }
             return null;
+        }
+
+        /// A womb ITEM in the Studio selection, if that is what is selected. The pair key then works on that womb
+        /// alone - the one way to set up a womb that is on neither of her orifices, or on nobody at all.
+        private static WombExpandEffect SelectedWomb()
+        {
+            try
+            {
+                foreach (var oci in KKAPI.Studio.StudioAPI.GetSelectedObjects())
+                {
+                    // An ITEM, never a character: her wombs hang UNDER her, so a selected girl would answer with
+                    // one of them and take the whole key down the wrong path.
+                    var item = oci as Studio.OCIItem;
+                    var tt = (item != null && item.guideObject != null) ? item.guideObject.transformTarget : null;
+                    var w = tt != null ? tt.GetComponentInChildren<WombExpandEffect>(true) : null;
+                    if (w != null) return w;
+                }
+            }
+            catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: reading the Studio selection failed: " + e.Message); }
+            return null;
+        }
+
+        /// Her womb of one kind - the one the key is allowed to manage.
+        /// ANAL: the womb hanging in her a_n_ana point, and nothing else. Where a womb SITS cannot answer this
+        /// question: her anus is 4.3cm from her vagina, so a womb she wears anywhere on that half of her reads as
+        /// "nearer the anus", and the key adopted a lone womb she wore elsewhere instead of adding one at her
+        /// anus. A distance limit cannot answer it either, because a lone womb worn elsewhere on that half of her
+        /// passes any such test. The slot is placement the author chose, and it is
+        /// where this key puts the womb it adds, so it is the one honest answer.
+        /// VAGINAL: the a_n_kokan point OR a womb seated on her vagina, because scenes older than this key have
+        /// wombs put in her vagina by hand and a slot-only rule would add a second one on top of them.
+        /// A womb she wears anywhere else belongs to neither key - select that womb and press the pair key.
+        private static WombExpandEffect HerWomb(Component girl, bool anal)
+        {
+            Transform bone = AutoBodyReveal.OrificeBone(girl, anal);
+            string slot = anal ? AnalPointKey : AttachPointKey;
+            WombExpandEffect best = null; float bestD = float.MaxValue; bool bestInSlot = false;
+            foreach (var w in WombsFor(girl))
+            {
+                if (w == null) continue;
+                bool inSlot = AutoBodyReveal.InAccessorySlot(w, slot, girl);
+                if (anal)
+                {
+                    if (!inSlot) continue;
+                }
+                else
+                {
+                    if (AutoBodyReveal.IsAnalWomb(w, girl)) continue;
+                    if (!inSlot && (bone == null
+                        || Vector3.Distance(bone.position, w.EntranceWorld()) > AutoBodyReveal.OrificeSeatRange)) continue;
+                }
+                float d = bone != null ? Vector3.Distance(bone.position, w.EntranceWorld()) : 0f;
+                if (d < bestD) { bestD = d; best = w; bestInSlot = inSlot; }
+            }
+            if (best != null)
+                LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: '" + girl.name + "'s " + (anal ? "anal" : "vaginal")
+                    + " womb is '" + best.name + "' (" + (bestInSlot ? "in her " + slot + " point" : "not in " + slot)
+                    + ", " + (bone != null ? (bestD * 100f).ToString("F1") + "cm from " + bone.name : "no orifice bone") + ").");
+            return best;
+        }
+
+        /// The apply itself: takeover on, note addressed to this girl, one womb only.
+        private static void ApplyWithNote(Component girl, WombExpandEffect w, bool claimByTip)
+        {
+            AutoBodyReveal.PenisNote = null; AutoBodyReveal.PenisUpgraded = false;
+            // Takeover: this key promises a finished setup, so a penis held by a stray hand-made
+            // constraint is claimed rather than skipped (other wombs' penises stay untouchable).
+            AutoBodyReveal.PenisTakeover = true; AutoBodyReveal.PenisNoteFor = girl;
+            MEBridge.UpgradeStack = true;   // this key opts the character into the sub-2500 stack
+            try
+            {
+                AutoBodyReveal.ApplyAll(girl, w, claimByTip);
+                // Her pair is her body's, so her OTHER wombs (and the penises they hold) come along with it.
+                if (girl != null) AutoBodyReveal.SyncPairAcross(girl, w);
+            }
+            finally { AutoBodyReveal.PenisTakeover = false; AutoBodyReveal.PenisNoteFor = null; MEBridge.UpgradeStack = false; }
+        }
+
+        /// The pair key with a womb SELECTED. That womb alone: its wearer, if it has one, is stamped and the womb
+        /// takes her pair, but her other wombs are left exactly as they are. The penis is the one aimed nearest
+        /// its aim bone, since nothing about her placement says which one belongs here.
+        private static void ApplyToWomb(WombExpandEffect w)
+        {
+            string how;
+            Component wearer = AutoBodyReveal.ResolveWearer(w, out how);
+            if (wearer != null)
+            {
+                int idx = HerPairIndex(wearer);
+                if (idx < 0) idx = FirstFreePairIndex(wearer);
+                if (idx < 0) idx = 0;
+                if (!SetPair(w, Pairs[idx])) { Say("could not set the stencil pair on '" + w.name + "' - see the log."); return; }
+            }
+            ApplyWithNote(wearer, w, true);
+            Say("womb '" + w.name + "'" + (wearer != null ? " on '" + wearer.name + "'" : " (worn by nobody)")
+                + " -> the penis aimed nearest it"
+                + (AutoBodyReveal.PenisNote != null ? ", " + AutoBodyReveal.PenisNote : "")
+                + (AutoBodyReveal.PenisUpgraded ? ", old single-material penis UPGRADED" : "") + ".");
         }
 
         /// EVERY womb already serving this girl. Deliberately the SAME resolver the apply path uses,
@@ -324,12 +486,12 @@ namespace LiquidWobbleMPB
         /// Add "Xray Womb 1" through Studio's own add path (so it appears in the workspace, is
         /// selectable and undoable). Returns the new Studio object; Tick() parents and places it -
         /// the item's CloXray component only exists once its baked Start() has run.
-        private static Studio.ObjectCtrlInfo AddWombFor(Component girl)
+        private static Studio.ObjectCtrlInfo AddWombFor(Component girl, bool anal)
         {
             int group, category, no;
-            if (!ResolveWombItemKeys(out group, out category, out no))
+            if (!ResolveWombItemKeys(anal, out group, out category, out no))
             {
-                LiquidWobbleMPBPlugin._logger?.LogError("CloXray: '" + WombBundlePath
+                LiquidWobbleMPBPlugin._logger?.LogError("CloXray: '" + (anal ? AnalBundlePath : WombBundlePath)
                     + "' is not in Studio's item list - is [Clo]XrayWomb1.zipmod installed? Nothing added.");
                 return null;
             }
@@ -373,9 +535,10 @@ namespace LiquidWobbleMPB
 
         /// Studio's live item table, keyed group -> category -> id. Modded items are re-numbered by
         /// Sideloader at load, so this is the only trustworthy way to name ours.
-        private static bool ResolveWombItemKeys(out int group, out int category, out int no)
+        private static bool ResolveWombItemKeys(bool anal, out int group, out int category, out int no)
         {
             group = category = no = -1;
+            string bundle = anal ? AnalBundlePath : WombBundlePath, file = anal ? AnalFileName : WombFileName;
             try
             {
                 var info = Studio.Info.Instance;
@@ -386,7 +549,7 @@ namespace LiquidWobbleMPB
                         {
                             var il = i.Value;
                             if (il == null) continue;
-                            if (il.bundlePath == WombBundlePath || il.fileName == WombFileName)
+                            if (il.bundlePath == bundle || il.fileName == file)
                             { group = g.Key; category = c.Key; no = i.Key; return true; }
                         }
             }
@@ -397,7 +560,7 @@ namespace LiquidWobbleMPB
         /// Her attach-point node for AttachPointKey. Studio maps each of those nodes to a point
         /// index in OCIChar.dicAccessoryPoint, and Info.dicAccessoryPointInfo turns the index into the
         /// a_n_* name - so the slot is found by NAME rather than by position in the tree.
-        private static Studio.TreeNodeObject FindAttachPoint(Studio.OCIChar och)
+        private static Studio.TreeNodeObject FindAttachPoint(Studio.OCIChar och, string key)
         {
             if (och == null || och.dicAccessoryPoint == null) return null;
             try
@@ -408,7 +571,7 @@ namespace LiquidWobbleMPB
                     if (info == null || info.dicAccessoryPointInfo == null) break;
                     Studio.Info.AccessoryPointInfo api;
                     if (!info.dicAccessoryPointInfo.TryGetValue(kv.Value, out api) || api == null) continue;
-                    if (api.key == AttachPointKey) return kv.Key;
+                    if (api.key == key) return kv.Key;
                 }
             }
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: reading her attach points failed: " + e.Message); }

@@ -25,6 +25,11 @@ Press `Ctrl+Shift+W` again to move that female to the next stencil pair; a secon
 scene takes her own pair automatically (two sharing one would see each other's organs). After the
 last pair the x-ray comes off, and the next press starts over.
 
+For her **anus**, press `Ctrl+Shift+A` instead: it adds *Xray Womb 2* at her anus point with the
+uterus collapsed (a plain canal), on the pair she is already using. Select a **womb** rather than a
+character and `Ctrl+Shift+W` sets up that womb alone, taking the penis aimed nearest it - that is
+how a womb worn somewhere else, or by nobody, gets wired.
+
 The womb item itself is never deleted by the hotkey - delete it in the workspace when you want it
 gone.
 
@@ -41,7 +46,8 @@ For placing the womb yourself, or for putting the liquid in something that is no
 
 1. **Add -> Clo -> Xray -> "Xray Womb 1".**
 2. Place it in the female's vagina and leave its **position and rotation at default** - it is built
-   to sit correctly there.
+   to sit correctly there. `Ctrl+Shift+W` places it 5mm forward (position Z `0.005`), which centres
+   the opened canal on the penis; either is fine.
 3. Select the womb and press `Shift+Alt+X`. The body turns see-through over the womb, and any penis
    inside is x-rayed and aimed down the centre of the canal.
 
@@ -317,6 +323,12 @@ They exist so that a per-womb *setting* saves with the scene, which an F1 config
   entirely. Values above 50 do not increase it further - the gate is already fully open at 50.
 - `BP_IgnoreColliders` - above 50, this womb ignores toys and bottles and reacts only to a
   BetterPenetration penis. The global equivalent is *F1 -> WombExpand -> React to colliders*.
+- `BP_IndependentRings` - at 0 (the default) a ring stays open while anything is deeper than it, which
+  is what a shaft does to a canal. Any value above 0 makes each ring react only to what is actually
+  beside it, so a small ball opens the ring it is passing through and the rings behind it close again -
+  one ring at a time as it travels. The value is how wide a band travels with the object: around 20 is
+  a tight grip on a ball, 100 opens about a ring and a half either side. Toys and other colliders only;
+  a BetterPenetration penis is unaffected, since a shaft spans every ring behind its tip anyway.
 
 ## Slider reference (Material Editor)
 

@@ -2903,6 +2903,7 @@ namespace LiquidWobbleMPB
         private static FieldInfo _fConstraints;     // NodesConstraints._constraints (List<Constraint>)
         private static FieldInfo _fChildTransform;  // Constraint.childTransform
         private static FieldInfo _fParentTransform; // Constraint.parentTransform
+        private static FieldInfo _fPositionOffset;  // Constraint.positionOffset (parent-local: NC does parent.TransformPoint(offset))
         private static Harmony _ncHarmony;          // patches the NC pairing-change methods (add / enable-disable / delete)
         private static bool _pairingHooksTried;     // install-once guard for the pairing hooks
 
@@ -3165,6 +3166,56 @@ namespace LiquidWobbleMPB
             return null;
         }
 
+        // The EXISTING parent -> child link, or null. Both ends must match - a node can carry several links.
+        private static object FindLink(Transform parentTransform, Transform childTransform)
+        {
+            Init();
+            var inst = Instance();
+            if (inst == null || parentTransform == null || childTransform == null) return null;
+            try
+            {
+                if (_fConstraints == null) _fConstraints = _ncType.GetField("_constraints", BF);
+                var list = (_fConstraints != null ? _fConstraints.GetValue(inst) : null) as System.Collections.IList;
+                if (list == null) return null;
+                foreach (var c in list)
+                {
+                    if (c == null) continue;
+                    if (_fChildTransform == null)  _fChildTransform  = c.GetType().GetField("childTransform", BF);
+                    if (_fParentTransform == null) _fParentTransform = c.GetType().GetField("parentTransform", BF);
+                    if (_fPositionOffset == null)  _fPositionOffset  = c.GetType().GetField("positionOffset", BF);
+                    if (_fChildTransform == null || _fParentTransform == null || _fPositionOffset == null)
+                    {
+                        LiquidWobbleMPBPlugin._logger?.LogError("NodeConstraintBridge: NodesConstraints' Constraint has no childTransform/"
+                            + "parentTransform/positionOffset field any more - link offsets cannot be read or set.");
+                        return null;
+                    }
+                    if ((_fChildTransform.GetValue(c) as Transform) == childTransform
+                        && (_fParentTransform.GetValue(c) as Transform) == parentTransform) return c;
+                }
+            }
+            catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogError("NodeConstraintBridge: reading the links failed: " + e.Message); }
+            return null;
+        }
+
+        /// The position offset of the parent -> child link (parent-local, as NodesConstraints applies it).
+        public static bool GetLinkOffset(Transform parentTransform, Transform childTransform, out Vector3 localOffset)
+        {
+            localOffset = Vector3.zero;
+            object c = FindLink(parentTransform, childTransform);
+            if (c == null) return false;
+            localOffset = (Vector3)_fPositionOffset.GetValue(c);
+            return true;
+        }
+
+        /// Set the position offset of the EXISTING parent -> child link. False when there is no such link.
+        public static bool SetLinkOffset(Transform parentTransform, Transform childTransform, Vector3 localOffset)
+        {
+            object c = FindLink(parentTransform, childTransform);
+            if (c == null) return false;
+            _fPositionOffset.SetValue(c, localOffset);
+            return true;
+        }
+
         /// The driver of `child` whose name matches `parentName`, or null. A node can carry SEVERAL
         /// constraints - a scene may deliberately stack cf_J_Vagina_root (which wakes BP) and a hand-made sphere
         /// (which does the positioning) on the same k_f_dan_entry - so this asks for the one that
@@ -3235,7 +3286,9 @@ namespace LiquidWobbleMPB
         // FAIL-LOUD: a NodesConstraints link only DRIVES if an endpoint resolves to a registered Studio GuideObject
         // at add time (cached, not re-resolved per frame). If a freshly-added one resolved NEITHER, warn - it
         // persists and looks added but won't move anything (the silent-fallback case to surface).
-        public static bool AddPositionLink(Transform parentTransform, Transform childTransform, string alias)
+        // `localOffset` is in the PARENT's local space - NodesConstraints places the child at
+        // parent.TransformPoint(offset) every frame, so the offset turns and scales with the parent.
+        public static bool AddPositionLink(Transform parentTransform, Transform childTransform, string alias, Vector3 localOffset = default(Vector3))
         {
             Init();
             if (_addConstraint == null || parentTransform == null || childTransform == null) return false;
@@ -3244,7 +3297,7 @@ namespace LiquidWobbleMPB
             try
             {
                 object res = _addConstraint.Invoke(inst, new object[] {
-                    true, parentTransform, childTransform, true, Vector3.zero, false, Quaternion.identity, false, Vector3.zero, alias });
+                    true, parentTransform, childTransform, true, localOffset, false, Quaternion.identity, false, Vector3.zero, alias });
                 string pair = "'" + parentTransform.name + "' -> '" + childTransform.name + "'";
                 if (res == null) { LiquidWobbleMPBPlugin._logger?.LogInfo("NodeConstraintBridge: constraint " + pair + " already present."); return true; }
                 // No GuideObject check: NodesConstraints moves the child transform itself every frame, so the
@@ -3679,6 +3732,12 @@ namespace LiquidWobbleMPB
         // to the womb, so "in range" is not a passive judgement, it moves the scene. 0.15m keeps the real
         // couple and leaves a bystander alone.
         private const float  PenisWombRange = 0.15f;
+        // KEY PRESS CLAIM. A key press takes the penis whose BASE is nearest her canal mouth: the base is where the
+        // character actually is, while his aim node can have been left anywhere by an old link. A base farther
+        // than this is not at her at all. A hidden penis counts (the key unhides the one it takes); a female counts
+        // only while her penis is shown, since every female carries a hidden one at her crotch.
+        private const float  KeyClaimRange = 0.35f;
+        private const string PenisBaseBone = "cm_J_dan100_00";
         private const int    HotkeyBuild = 15;                  // bump per plugin build so the log identifies the loaded DLL
 
         public static bool Enabled { get; set; } = true;
@@ -3825,6 +3884,14 @@ namespace LiquidWobbleMPB
             catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: studio-owner lookup failed for '" + t.name + "': " + e.Message); return null; }
         }
 
+        // The transform Studio moves for the object that owns `t` (its guide target). Null outside Studio.
+        internal static Transform StudioObjectRoot(Transform t)
+        {
+            if (!MainGameWomb.IsStudio) return null;
+            var oci = OwningStudioObject(t);
+            return (oci != null && oci.guideObject != null) ? oci.guideObject.transformTarget : null;
+        }
+
         // Walks the womb item's workspace node upward to the first character node above it.
         private static Component WearerFromStudioTree(WombExpandEffect w)
         {
@@ -3899,6 +3966,7 @@ namespace LiquidWobbleMPB
             _bodyReloadUntil = Time.unscaledTime + 5f;   // see BodyReloadSettling
             // A (re)load can change the vagina-root list AND the womb<->penis pairing candidates -> refresh both event-driven.
             WombExpandEffect.InvalidateVaginaRoots();
+            MainGameWomb.InvalidateTargetFemale();   // same reason: the H target female is resolved by a cached scene scan
             WombExpandEffect.RequestRepair();
             // The BP-interop hooks are CloXray-womb-scoped: install them only while a womb is in the scene, so a
             // no-CloXray scene is never patched. (They also early-out on AnyActive at runtime, so a leftover patch is
@@ -4172,43 +4240,66 @@ namespace LiquidWobbleMPB
 
         private static Transform EntryAnchorFor(WombExpandEffect w, Component receiver, Transform ourEntry, bool shownOnly)
         {
-            if (receiver == null || w == null) return null;
+            if (w == null) return null;
             Vector3 mouth = w.EntranceWorld();
             string wn = w.name;
+            // A womb that belongs to nobody - standing on its own in the scene - is still entered at its own mouth.
+            // Without an entry anchor the marker stays at his crotch, and the womb then reads the penis as withdrawn
+            // (the entry-detach gate) and never reacts at all.
+            if (receiver == null)
+            {
+                Transform ownCanal = w.CanalEntryBone;
+                if (ownCanal != null)
+                {
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + wn
+                        + "' is worn by nobody - entering the penis at its own canal mouth.");
+                    return ownCanal;
+                }
+            }
 
-            // Seated in one of her BetterPenetration orifices? Only BP's own entry bones qualify: BP reads
-            // the parent bone's name to decide vaginal vs anal, and drives its colliders and pull bones
-            // from that. Plain FindChild is enough - the 7.4.0 womb carries none of these names.
-            var seats = new System.Collections.Generic.List<KeyValuePair<float, Transform>>();
-            foreach (var nm in BpOrifices)
+            // HER VAGINA IS THE ONE ORIFICE WORTH LINKING, and only one womb gets it. In this game BetterPenetration
+            // animates the vaginal side alone - the penis colliders go into her vagina's dynamic bones, while the
+            // anal side has a single dynamic bone most bodies do not carry and both "push" features are compiled
+            // out for KK/KKS - and a recognised orifice is also what makes BP report depth at all (it reads the
+            // parent bone's name: Vagina, Ana or Mouth). So the womb sitting on her vagina takes the BP link, and
+            // every other womb - one at her anus, a second womb in the same vagina, a womb standing on its own - is
+            // entered at its OWN canal mouth, where the depth is measured by projecting the penis tip onto the canal
+            // instead - the same quantity BP reports, since BP holds the shaft straight between its two markers, so
+            // the tip's advance past the entry marker IS its depth. BP still bends and squishes the penis into those
+            // exactly as it does here.
+            Transform vagina = FindChild(receiver.transform, VaginaBone);
+            float vagDist = (vagina != null) ? Vector3.Distance(vagina.position, mouth) : float.MaxValue;
+            // HER ANUS IS 4.3cm FROM HER VAGINA, well inside the seat range, so a womb placed at the anus would
+            // otherwise pass the test below and take the vaginal link - which is what it did. A womb hanging in
+            // her a_n_ana point, or simply sitting nearer her anus than her vagina, is not the vaginal one.
+            bool atAnus = IsAnalWomb(w, receiver);
+            if (atAnus)
+                LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + wn + "' sits at '" + receiver.name
+                    + "'s anus, not her vagina - entering it at its own canal mouth.");
+            if (!atAnus && vagina != null && vagDist <= OrificeSeatRange)
             {
-                Transform b = FindChild(receiver.transform, nm);
-                if (b == null) continue;
-                seats.Add(new KeyValuePair<float, Transform>(Vector3.Distance(b.position, mouth), b));
-            }
-            seats.Sort((x, y) => x.Key.CompareTo(y.Key));
-            if (Debug && seats.Count > 0)
-            {
-                var sb = new System.Text.StringBuilder("AutoBodyReveal: womb '").Append(wn).Append("' orifice seats on '").Append(receiver.name).Append("':");
-                foreach (var kv in seats) sb.Append(" ").Append(kv.Value.name).Append("=").Append((kv.Key * 100f).ToString("F1")).Append("cm");
-                LiquidWobbleMPBPlugin._logger?.LogInfo(sb.ToString());
-            }
-            foreach (var kv in seats)
-            {
-                if (kv.Key > OrificeSeatRange) break;                 // not seated in this one, nor any farther one
-                if (AnchorTakenBy(kv.Value, ourEntry, shownOnly)) continue;   // that orifice already has a penis
-                if (Debug) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + wn + "' entry anchor = '" + kv.Value.name
-                    + "' (" + (kv.Key * 100f).ToString("F1") + "cm from the womb mouth - the nearest orifice within "
-                    + (OrificeSeatRange * 100f).ToString("F0") + "cm not holding another " + (shownOnly ? "shown " : "") + "male's penis).");
-                return kv.Value;
+                WombExpandEffect nearest = WombNearestTo(receiver, vagina.position);
+                if (nearest != null && nearest != w)
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + wn + "' shares '" + receiver.name
+                        + "'s vagina with '" + nearest.name + "', which sits closer to it, so this one is entered at its own canal mouth.");
+                else if (AnchorTakenBy(vagina, ourEntry, shownOnly))
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + wn + "' - her " + VaginaBone
+                        + " already holds another " + (shownOnly ? "shown " : "") + "male's entry, so this one is entered at its own canal mouth.");
+                else
+                {
+                    if (Debug) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + wn + "' entry anchor = '"
+                        + vagina.name + "' (" + (vagDist * 100f).ToString("F1") + "cm from the womb mouth).");
+                    return vagina;
+                }
             }
 
             // Anywhere else: the womb's own canal mouth, so the penis enters the womb where it actually is.
             Transform canal = w.CanalEntryBone;
             if (canal != null)
             {
-                LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + wn + "' is not seated in one of "
-                    + receiver.name + "'s BetterPenetration orifices - anchoring the penis entry at the womb's own canal mouth.");
+                LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + wn + "' is entered at its own canal mouth"
+                    + (vagDist < float.MaxValue ? " (her " + VaginaBone + " is " + (vagDist * 100f).ToString("F1") + "cm away)" : "")
+                    + " - BetterPenetration will not classify this one, so the plugin computes his compression itself.");
                 return canal;
             }
 
@@ -4220,16 +4311,84 @@ namespace LiquidWobbleMPB
             return null;
         }
 
-        // BP's own entry targets: the vagina and the anus. Anchoring at one of these is what makes BP
-        // treat the penetration as vaginal or anal (colliders, and the pull bones that deform her).
-        // From BP's own source: LookTargets.BPAnaTarget = "cf_J_Ana_Root" (a BP-uncensored body's look
-        // target) and BoneNames.AnaTarget = "cf_j_ana" (KK's own anal bone, what BP matches against).
-        // Only the second exists on a KK body - cf_J_Ana_Root was never found in any log from this
-        // game - so without it an anal womb could never seat and fell through to "not in a BP orifice",
-        // then seated on cf_J_Vagina_root instead because the anus is 4.3cm from it and the seat range
-        // is 10cm. Both are listed; seats are sorted by distance, so the nearer one wins.
-        private static readonly string[] BpOrifices = { VaginaBone, "cf_j_ana", "cf_J_Ana_Root" };
-        private const float OrificeSeatRange = 0.10f;   // beyond this the womb is not sitting in that orifice
+        internal const float OrificeSeatRange = 0.10f;  // beyond this the womb is not sitting on that orifice
+
+        /// Her vagina bone, or her anal one - the two a womb can sit on.
+        internal static Transform OrificeBone(Component receiver, bool anal)
+        {
+            return receiver != null ? FindChild(receiver.transform, anal ? AnalBone : VaginaBone) : null;
+        }
+        private const string AnalBone = "cf_j_ana";     // KK's own anal bone - BP's AnaTarget, and what a womb at her anus sits on
+        private const string AnalSlotName = "a_n_ana";  // Studio's anus accessory point, the anal twin of a_n_kokan
+
+        // Does this womb hang in one of her accessory points by that name? The Studio object's parent IS that
+        // point (OCIChar.OnAttach parents the item's guide target to the ChaReference object). When the wearer is
+        // known, identify the point by the OBJECT - a_n_ana is a real transform in her rig, and Studio's own
+        // AccessoryPointInfo.key is that object's name - and fall back to the parent's name only without her.
+        // IsChildOf rather than parent ==, so a womb nested one folder deeper inside the point still counts.
+        internal static bool InAccessorySlot(WombExpandEffect w, string key, Component receiver = null)
+        {
+            Transform item = (w != null) ? StudioObjectRoot(w.transform) : null;
+            if (item == null) return false;
+            Transform point = (receiver != null) ? FindChild(receiver.transform, key) : null;
+            if (point != null) return item != point && item.IsChildOf(point);
+            return item.parent != null && item.parent.name == key;
+        }
+
+        /// Is this womb PHYSICALLY at her anus rather than her vagina? Her anus is ~4.3cm from cf_J_Vagina_root,
+        /// well inside the seat range, so proximity to the vagina alone would call an anal womb vaginal - and it
+        /// did. The a_n_ana point is the definite answer when the womb hangs in it; otherwise the womb has to SIT
+        /// on her anus - inside the seat range AND nearer it than her vagina.
+        /// This answers "which orifice is it on", which is the ENTRY ANCHOR question: a womb an author placed at
+        /// her anus by hand must not take her vaginal BP link, however it got there. It is NOT the question the
+        /// anal hotkey asks - that one owns the a_n_ana point and nothing else (StudioPairWomb.HerWomb).
+        internal static bool IsAnalWomb(WombExpandEffect w, Component receiver)
+        {
+            if (w == null) return false;
+            if (InAccessorySlot(w, AnalSlotName, receiver)) return true;
+            if (receiver == null || InAccessorySlot(w, "a_n_kokan", receiver)) return false;
+            Transform anus = FindChild(receiver.transform, AnalBone);
+            if (anus == null) return false;   // no anal bone on this body - only the slot can say, and it did not
+            Vector3 mouth = w.EntranceWorld();
+            float anusDist = Vector3.Distance(anus.position, mouth);
+            if (anusDist > OrificeSeatRange) return false;
+            Transform vagina = FindChild(receiver.transform, VaginaBone);
+            return vagina == null || anusDist < Vector3.Distance(vagina.position, mouth);
+        }
+
+        // A withdrawn test build pinned a womb's OWN entry link 5mm toward the womb's back with a NodesConstraints
+        // offset, because the rings open further to the back than the closed mouth the marker sits on. The shipped
+        // answer moves the MARKER instead - the womb bundle places clo_canal_entry 4mm back - and leaves every link
+        // at ZERO offset. A scene saved by that test build still carries the offset on its link, so the key
+        // recognises exactly it and puts it back to zero; any other offset on the link is deliberate and stays.
+        private const float WithdrawnTestBackMM = 5f;
+
+        private static bool IsWithdrawnTestOffset(WombExpandEffect w, Transform canal, Vector3 localOffset)
+        {
+            if (w == null || canal == null) return false;
+            Vector3 axis = canal.up;
+            Vector3 back = -w.transform.forward;
+            back -= Vector3.Dot(back, axis) * axis;
+            if (back.sqrMagnitude < 1e-6f) return false;
+            Vector3 test = canal.InverseTransformVector(back.normalized * (WithdrawnTestBackMM * 0.001f * Mathf.Abs(w.transform.lossyScale.z)));
+            return canal.TransformVector(localOffset - test).magnitude < 0.0005f;
+        }
+
+        // Of the wombs this character wears, the one whose canal mouth is nearest a point - used to tell which of
+        // several wombs in the same vagina sits at the default placement, since that one takes the BP link.
+        private static WombExpandEffect WombNearestTo(Component receiver, Vector3 point)
+        {
+            WombExpandEffect best = null; float bestD = OrificeSeatRange;
+            foreach (var w in UnityEngine.Object.FindObjectsOfType<WombExpandEffect>())
+            {
+                if (w == null) continue;
+                string how;
+                if (!ReferenceEquals(ResolveWearer(w, out how), receiver)) continue;
+                float d = Vector3.Distance(point, w.EntranceWorld());
+                if (d <= bestD) { bestD = d; best = w; }
+            }
+            return best;
+        }
 
         // Is this bone already driving a DIFFERENT penis's entry? With `shownOnly` (a key press) a hidden
         // character's link does not count: a scene that swaps which male is shown links them all to one orifice.
@@ -4262,7 +4421,8 @@ namespace LiquidWobbleMPB
             Transform target = FindChild(w.transform, "penis_target");
             if (target == null) return null;
             Component penetrator;
-            Transform end = NearestPenisEnd(UnityEngine.Object.FindObjectsOfType<Transform>(), target.position, receiver, out penetrator);
+            float gap;
+            Transform end = NearestPenisEnd(UnityEngine.Object.FindObjectsOfType<Transform>(), target.position, receiver, out penetrator, out gap);
             return (penetrator != null && end != null && Vector3.Distance(end.position, target.position) <= PenisWombRange) ? penetrator : null;
         }
 
@@ -4311,14 +4471,56 @@ namespace LiquidWobbleMPB
             WobbleSceneController.DeferBpRebind(w, cc);   // BP cleared her collision agent on the body reload - re-bind once BP settles
         }
 
+        /// Her stencil pair moved, and it is HER BODY's - so every womb she wears carries it, not just the one the
+        /// key was setting up. SetPairAll has already written the pair onto each of them; this brings along what
+        /// hangs off it: each womb's own stack, and the x-ray on the penis that womb already holds. No claiming and
+        /// no links are touched - the key sets up ONE hole, the rest only need their stencil to keep matching her.
+        internal static void SyncPairAcross(Component girl, WombExpandEffect except)
+        {
+            if (girl == null) return;
+            bool hadUpgrade = MEBridge.UpgradeStack;
+            if (!hadUpgrade) MEBridge.UpgradeStack = MEBridge.StampIsUpgraded(MEBridge.FindBodyStamp(girl));
+            try
+            {
+                foreach (var w in UnityEngine.Object.FindObjectsOfType<WombExpandEffect>())
+                {
+                    if (w == null || w == except) continue;
+                    string how;
+                    if (!ReferenceEquals(ResolveWearer(w, out how), girl)) continue;
+                    SyncWombStack(w, girl, false);
+                    Transform target = FindChild(w.transform, "penis_target");
+                    if (target == null) continue;
+                    int st = w.OrganStencil();
+                    foreach (var pair in NodeConstraintBridge.LivePairs())
+                    {
+                        if (pair.Key != target || pair.Value == null || pair.Value.name != "k_f_dan_end") continue;
+                        Component male = FindChaControlOf(pair.Value);
+                        if (male == null) continue;
+                        MEBridge.EnsurePenisOrgInside(male, st, true);
+                        LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "' moved to stencil "
+                            + st + " with '" + girl.name + "' - re-stamped '" + male.name + "'s penis to match.");
+                    }
+                }
+            }
+            catch (Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: carrying the pair across her other wombs failed: " + e.Message); }
+            finally { if (!hadUpgrade) MEBridge.UpgradeStack = false; }
+        }
+
         // Manual hotkey: apply now to every character that has a womb within MaxRange of its vagina
         // (covers the initial placement, where no reload event fires).
-        public static void ApplyAll()
+        /// `onlyWomb` narrows the pass to that one womb, `onlyFor` to the wombs worn by that character - the pair
+        /// keys work on one womb of the selected girl and leave every other couple in the scene exactly as it is,
+        /// so a scene is set up one hole at a time. Null for both applies to every womb (the plain apply key).
+        /// `claimByTip` picks the penis whose TIP is nearest this womb's aim bone instead of the one whose base is
+        /// nearest her canal mouth: for a womb that is not on one of her orifices, where he is pointed is the only
+        /// thing that says which penis is meant for it.
+        public static void ApplyAll(Component onlyFor = null, WombExpandEffect onlyWomb = null, bool claimByTip = false)
         {
             if (!LiquidWobbleMPBPlugin.CfgEnabled) return;   // master toggle OFF -> hotkey does nothing
             AttachLiquidWobbleSelected();      // bottles etc.: attach the wobble driver to the SELECTED item(s) only
             var wombs = UnityEngine.Object.FindObjectsOfType<WombExpandEffect>();
-            LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: manual apply — " + wombs.Length + " womb(s), MaxRange=" + MaxRange.ToString("F3") + "m.");
+            LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: manual apply — " + wombs.Length + " womb(s)"
+                + (onlyFor != null ? ", only those worn by '" + onlyFor.name + "'" : "") + ", MaxRange=" + MaxRange.ToString("F3") + "m.");
             if (wombs.Length == 0) { LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: manual apply - no CloXray wombs in scene."); return; }
             if (Debug) NodeConstraintBridge.DumpConstraints("constraints BEFORE apply");
             // NEAREST FIRST. A penis can only be claimed once (the constraint guard refuses a second
@@ -4328,8 +4530,19 @@ namespace LiquidWobbleMPB
             var scan = UnityEngine.Object.FindObjectsOfType<Transform>();
             var order = new System.Collections.Generic.List<KeyValuePair<float, WombExpandEffect>>();
             foreach (var w0 in wombs)
-                if (w0 != null) order.Add(new KeyValuePair<float, WombExpandEffect>(NearestPenisDistance(w0, scan), w0));
+            {
+                if (w0 == null) continue;
+                if (onlyWomb != null && w0 != onlyWomb) continue;
+                if (onlyWomb == null && onlyFor != null)
+                {
+                    string howSel;
+                    if (!ReferenceEquals(ResolveWearer(w0, out howSel), onlyFor)) continue;
+                }
+                order.Add(new KeyValuePair<float, WombExpandEffect>(NearestPenisDistance(w0, scan), w0));
+            }
             order.Sort((x, y) => x.Key.CompareTo(y.Key));
+            if (onlyFor != null && order.Count == 0)
+                LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: manual apply - no womb is worn by '" + onlyFor.name + "'.");
             if (Debug && order.Count > 1)
             {
                 var sb = new System.Text.StringBuilder("AutoBodyReveal: womb order (closest penis first):");
@@ -4354,7 +4567,7 @@ namespace LiquidWobbleMPB
                 // AUTO penis: x-ray + aim the PENETRATOR (the OTHER character that has a penis) at THIS womb. No
                 // selection needed, so it can't grab the receiver's own penis or duplicate across both partners.
                 SyncWombStack(w, cc, false);
-                ApplyPenisForWomb(w, cc, true);   // hotkey = an explicit request to wire this pair up
+                ApplyPenisForWomb(w, cc, true, claimByTip);   // hotkey = an explicit request to wire this pair up
             }
             // BP learns "this is vaginal" only when a k_f_dan_entry constraint is ADDED. Links the scene already
             // carried were restored before BP existed, and the load-time re-arm skipped her if she had no womb
@@ -4375,9 +4588,9 @@ namespace LiquidWobbleMPB
             if (target == null) return float.MaxValue;
             string how;
             Component wearer = ResolveWearer(w, out how);
-            Component pen;
-            Transform end = NearestPenisEnd(scan, target.position, wearer, out pen, target, null, true);
-            return (pen != null && end != null) ? Vector3.Distance(end.position, target.position) : float.MaxValue;
+            Component pen; float gap;
+            Transform end = NearestPenisEnd(scan, target.position, wearer, out pen, out gap, target, w.EntranceWorld(), true, w.CanalEntryBone);
+            return (pen != null && end != null) ? gap : float.MaxValue;
         }
 
         // MAIN-GAME direct path: the womb was spawned ON a known character, so skip the proximity
@@ -4803,7 +5016,7 @@ namespace LiquidWobbleMPB
             LiquidWobbleMPBPlugin._logger?.LogMessage("CloXray: unhid the penis on '" + male.name + "'.");
         }
 
-        private static void ApplyPenisForWomb(WombExpandEffect w, Component receiver, bool manual = false)
+        private static void ApplyPenisForWomb(WombExpandEffect w, Component receiver, bool manual = false, bool claimByTip = false)
         {
             // the same fault fixed for garments, on the path that fix does NOT reach. This is
             // called through AutoReapply, not ApplyForCharacterNow, so UpgradeStack was still false here
@@ -4819,12 +5032,30 @@ namespace LiquidWobbleMPB
                 Transform target = FindChild(w.transform, "penis_target");
                 if (target == null) { LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "' has no penis_target bone."); return; }
                 var all = UnityEngine.Object.FindObjectsOfType<Transform>();
-                Component penetrator;
-                Transform end = NearestPenisEnd(all, target.position, receiver, out penetrator, target, w.EntranceWorld(), manual);   // the OTHER character's penis, if unclaimed
+                Component penetrator; float claimGap;
+                Transform end = NearestPenisEnd(all, target.position, receiver, out penetrator, out claimGap, target, w.EntranceWorld(), manual, w.CanalEntryBone, claimByTip);   // the OTHER character's penis, if unclaimed
+                // The on-screen note is about the girl the key was pressed on, not whichever womb ran last.
+                bool noteHere = PenisTakeover && (PenisNoteFor == null || ReferenceEquals(receiver, PenisNoteFor));
                 if (penetrator == null || end == null)
                 {
-                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': no penetrator (a " + (manual ? "shown " : "") + "cm_m_dankon character other than the receiver) found.");
-                    if (PenisTakeover) PenisNote = "no penis on a shown male near her";
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': no penetrator ("
+                        + (manual ? "a shown character's penis with its base within " + (KeyClaimRange * 100f).ToString("F0") + "cm of her canal mouth"
+                                  : "a cm_m_dankon character other than the receiver") + ") found.");
+                    // WHY there is no candidate. A male whose uncensor is not BP-driven carries a penis MESH but no
+                    // k_f_dan bones, so he is never a candidate at all - and the plain "no penis base within 35cm"
+                    // note then blames DISTANCE, which sends people shuffling the male closer forever. Name the real
+                    // reason when a male with a penis is standing right there. (Studio does not change anyone's
+                    // uncensor - Free-H forces one, Studio asks; this message is the asking.)
+                    Component near = MainGameWomb.FindNearestMaleWithPenis(w.EntranceWorld(), KeyClaimRange, receiver);
+                    bool notBP = near != null && FindChild(near.transform, DanEntryBone) == null;
+                    if (notBP)
+                        LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: '" + near.name + "' is right at her but his penis is NOT BetterPenetration-driven"
+                            + " (no " + DanEntryBone + " bone), so nothing can aim or bend it. Give him a BP penis uncensor (\"BP SOS\" or similar) in"
+                            + " Character -> Uncensor, then press the key again.");
+                    if (noteHere)
+                        PenisNote = notBP
+                            ? "'" + near.name + "' is close enough, but his penis is not BP - give him a BP penis uncensor, then press again"
+                            : "no penis base within " + (KeyClaimRange * 100f).ToString("F0") + "cm of her";
                     return;
                 }
                 // Is that nearest penis actually IN this womb? With one male and several females-each-with-a-womb,
@@ -4848,7 +5079,13 @@ namespace LiquidWobbleMPB
                 // dropped. Another womb's penis can never reach this point - NearestPenisEnd refuses to
                 // return one - so this only ever re-adopts a pair already made here.
                 bool heldHere = NodeConstraintBridge.ParentOfChild(end) == target;
-                if (penisDist > PenisWombRange && heldHere)
+                // A key press has already chosen by where the character IS, so none of the tip-distance checks
+                // below apply to it: the aim link is what brings the tip to the womb.
+                if (manual)
+                    LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': '" + penetrator.name
+                        + "' has the nearest penis base, " + (claimGap * 100f).ToString("F0") + "cm from her canal mouth (tip "
+                        + penisDist.ToString("F2") + "m from penis_target" + (heldHere ? ", already held by this womb" : "") + ") - claiming him.");
+                if (!manual && penisDist > PenisWombRange && heldHere)
                 {
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': '" + penetrator.name + "' is "
                         + penisDist.ToString("F2") + "m from penis_target but THIS womb already holds his tip - keeping the pair.");
@@ -4857,7 +5094,7 @@ namespace LiquidWobbleMPB
                 // A LONE penis, explicitly asked for. The old guard also required the tip to carry NO
                 // constraint at all, so a penis held by a leftover or hand-made link could never be claimed
                 // however deliberate the request - the takeover path exists precisely to take those.
-                if (penisDist > PenisWombRange && (bpSaysThisPair || manual || PenisTakeover))
+                if (!manual && penisDist > PenisWombRange && (bpSaysThisPair || PenisTakeover))
                 {
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': '" + penetrator.name + "' is "
                         + penisDist.ToString("F2") + "m from penis_target, but "
@@ -4866,15 +5103,19 @@ namespace LiquidWobbleMPB
                         + " - aiming him at it (the aim link is what brings the penis to the womb).");
                     penisDist = 0f;
                 }
-                if (penisDist > PenisWombRange)
+                if (!manual && penisDist > PenisWombRange)
                 {
                     LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "': nearest penis ('" + penetrator.name + "') is " + penisDist.ToString("F2") + "m from penis_target (> " + PenisWombRange.ToString("F2") + "m) -> that male is in a DIFFERENT womb; skipping penis x-ray + aiming for this one.");
-                    if (PenisTakeover) PenisNote = "penis SKIPPED - nearest ('" + penetrator.name + "') is " + penisDist.ToString("F2") + "m away, another womb's";
+                    if (noteHere) PenisNote = "penis SKIPPED - nearest ('" + penetrator.name + "') is " + penisDist.ToString("F2") + "m away, another womb's";
                     return;
                 }
                 // The couple is settled (nearest, in range, not another womb's). Whether the tip is re-aimed is
                 // decided with the links below, and the on-screen note reports what that actually did.
                 CapturePenetrator(w, penetrator);   // remember his penis uncensor for a later male replacement
+                // Was this pair already set up with her? Then the key only completes what is missing below.
+                bool preSet = manual && PenisAlreadySetUp(end, target, penetrator,
+                                                          SeatOrifice(receiver, w.EntranceWorld()), w.CanalEntryBone,
+                                                          NodeConstraintBridge.LivePairs());
                 Transform entry  = FindChild(penetrator.transform, DanEntryBone);
                 Transform vagina = EntryAnchorFor(w, receiver, entry, manual);
                 int st = w.OrganStencil();
@@ -4882,7 +5123,9 @@ namespace LiquidWobbleMPB
                 // Say WHY he was taken. Claiming a penis moves the scene - the aim link drags him to the
                 // womb - so the gap that decided it belongs on screen, not only in the log.
                 string gapCm = (penisGap * 100f).ToString("F0") + "cm";
-                string howClaimed = penisGap <= PenisWombRange ? "claimed at " + gapCm
+                string howClaimed = manual ? (preSet ? "kept, already set up with her"
+                                                    : "claimed at " + (claimGap * 100f).ToString("F0") + "cm, penis base to her")
+                                  : penisGap <= PenisWombRange ? "claimed at " + gapCm
                                   : heldHere ? "adopted, already this womb's"
                                   : bpSaysThisPair ? "BP binds him to her, " + gapCm + " away"
                                   : "claimed by the key at " + gapCm;
@@ -4925,7 +5168,18 @@ namespace LiquidWobbleMPB
                     // NEVER reassign a dan node already targeted by hand (wired EITHER direction - e.g. aimed at a hand-made sphere).
                     if (entry != null && vagina != null)
                     {
-                        if (NodeConstraintBridge.HasConstraintForNode(entry)) LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: k_f_dan_entry already has a constraint -> leaving your target, not reassigning.");
+                        if (NodeConstraintBridge.HasConstraintForNode(entry))
+                        {
+                            // A link from this womb's own mouth that still carries that test offset is put back to
+                            // zero (see IsWithdrawnTestOffset); anything else on his entry node is left exactly as it is.
+                            Vector3 off;
+                            if (manual && vagina == w.CanalEntryBone
+                                && NodeConstraintBridge.GetLinkOffset(vagina, entry, out off) && IsWithdrawnTestOffset(w, vagina, off)
+                                && NodeConstraintBridge.SetLinkOffset(vagina, entry, Vector3.zero))
+                                LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: womb '" + w.name + "' - removed the 5mm entry offset"
+                                    + " an earlier test build put on its link; the entry sits on clo_canal_entry itself again.");
+                            else LiquidWobbleMPBPlugin._logger?.LogInfo("AutoBodyReveal: k_f_dan_entry already has a constraint -> leaving your target, not reassigning.");
+                        }
                         else if (!NodeConstraintBridge.AddPositionLink(vagina, entry, ""))   // empty alias -> shows raw "parent -> child" like a manual one
                             entryFailed = true;
                     }
@@ -4991,11 +5245,41 @@ namespace LiquidWobbleMPB
                     string kkpe = ClearKkpeAimEdits(penetrator);
                     if (kkpe != null) aimOutcome = aimOutcome != null ? aimOutcome + ", " + kkpe : kkpe;
                 }
-                if (PenisTakeover) PenisNote = "penis x-rayed on '" + penetrator.name + "' (" + howClaimed + ")"
+                if (noteHere) PenisNote = "penis x-rayed on '" + penetrator.name + "' (" + howClaimed + ")"
                                              + (aimOutcome != null ? ", " + aimOutcome : "");
             }
             catch (System.Exception e) { LiquidWobbleMPBPlugin._logger?.LogWarning("AutoBodyReveal: penis-for-womb failed on '" + (w != null ? w.name : "?") + "': " + e.Message); }
             finally { if (!hadUpgrade) MEBridge.UpgradeStack = false; }
+        }
+
+        // Her vagina, when this womb sits on it. The only orifice the key ever links an entry to - see EntryAnchorFor.
+        // Occupancy is not its business: this answers which orifice the womb IS, not where a new link may go.
+        private static Transform SeatOrifice(Component receiver, Vector3 mouth)
+        {
+            if (receiver == null) return null;
+            Transform vagina = FindChild(receiver.transform, VaginaBone);
+            return (vagina != null && Vector3.Distance(vagina.position, mouth) <= OrificeSeatRange) ? vagina : null;
+        }
+
+        // Is this penis ALREADY SET UP with this womb: its tip aimed at THIS womb's penis_target, or its entry on
+        // the womb's own canal mouth, or on her vagina when the womb sits there. Only NodesConstraints count - links
+        // that exist in the scene. BetterPenetration keeps a male bound to her after those links are deleted, and
+        // even after he is deleted, so its own binding says nothing about how the scene is wired.
+        private static bool PenisAlreadySetUp(Transform end, Transform target, Component male, Transform seat,
+                                              Transform ownMouth,
+                                              System.Collections.Generic.List<KeyValuePair<Transform, Transform>> pairs)
+        {
+            if (pairs == null) return false;
+            Transform entry = null; bool entryLooked = false;
+            foreach (var pr in pairs)
+            {
+                if (pr.Value == end && pr.Key == target) return true;
+                if ((seat == null || pr.Key != seat) && (ownMouth == null || pr.Key != ownMouth)) continue;
+                if (pr.Value == null || pr.Value.name != DanEntryBone) continue;
+                if (!entryLooked) { entry = male != null ? FindChild(male.transform, DanEntryBone) : null; entryLooked = true; }
+                if (entry != null && pr.Value == entry) return true;
+            }
+            return false;
         }
 
         // Nearest k_f_dan_end under a ChaControl that carries a cm_m_dankon penis, OTHER than `exclude` (the receiver).
@@ -5010,6 +5294,9 @@ namespace LiquidWobbleMPB
         // this layer knows which character was picked and why one was not.
         internal static string PenisNote;
         internal static bool   PenisUpgraded;
+        // Whose womb the note is about. The key press applies every womb in the scene, and the line on screen is
+        // for the girl it was pressed on. Null = any womb.
+        internal static Component PenisNoteFor;
 
         internal static bool PenisTakeover;
 
@@ -5017,19 +5304,29 @@ namespace LiquidWobbleMPB
         // A crowded scene reported "no penetrator found" for three wombs after a scene LOAD that had
         // paired fine on the hotkey press, and the reasons were invisible - which is what made it a
         // guess. Nothing here changes a decision; it only says out loud which one was taken.
-        private static Transform NearestPenisEnd(Transform[] all, Vector3 pos, Component exclude, out Component owner, Transform myTarget = null, Vector3? mouth = null, bool shownOnly = false)
+        private static Transform NearestPenisEnd(Transform[] all, Vector3 pos, Component exclude, out Component owner, out float claimDist, Transform myTarget = null, Vector3? mouth = null, bool shownOnly = false, Transform ownMouth = null, bool byTip = false)
         {
-            Transform best = null; float bsq = float.MaxValue; owner = null;
+            Transform best = null; float bsq = float.MaxValue; owner = null; claimDist = float.MaxValue;
+            // `byTip` is the key pressed on a womb that is not on one of her orifices: nothing about her says which
+            // penis belongs to it, so the one aimed nearest its aim bone is the one meant for it.
+            bool byBase = shownOnly && mouth.HasValue && !byTip;
+            // A PAIR ALREADY SET UP WITH HER KEEPS ITS PENIS, however close anyone else stands: his tip aimed at
+            // this womb's penis_target, or his entry on the orifice the womb sits on. Re-picking a wired couple by
+            // distance is what would break a scene someone posed or animated by hand. Distance only decides who is
+            // taken when nothing is wired yet, so the range limit below does not apply to these.
+            Transform bestSet = null; Component ownerSet = null; float bssq = float.MaxValue;
+            var livePairs = byBase ? NodeConstraintBridge.LivePairs() : null;
+            Transform seatBone = byBase ? SeatOrifice(exclude, mouth.Value) : null;
             var dbg = (Debug && myTarget != null) ? new System.Text.StringBuilder() : null;
             if (dbg != null)
             {
                 dbg.Append("AutoBodyReveal: PENIS CANDIDATES for penis_target#").Append(myTarget.GetInstanceID())
-                   .Append(" of '").Append(myTarget.root != null ? myTarget.root.name : "?").Append("':")
+                   .Append(" of the womb worn by '").Append(exclude != null ? exclude.name : "?").Append("':")
                    .AppendLine().Append("   target@").Append(pos.ToString("F2"));
                 if (mouth.HasValue) dbg.Append("  canalMouth@").Append(mouth.Value.ToString("F2"))
                                        .Append("  (they are ").Append(((mouth.Value - pos).magnitude * 1000f).ToString("F0")).Append("mm apart)");
-                // toMouth is the honest "is he in HER" measure; toTarget is what selection actually uses.
-                dbg.Append("   [toTarget = what CHOOSES; toMouth = distance to her canal mouth]");
+                dbg.Append(byBase ? "   [key press: BASE toMouth CHOOSES, within " + (KeyClaimRange * 100f).ToString("F0") + "cm]"
+                                  : "   [toTarget = what CHOOSES; toMouth = distance to her canal mouth]");
             }
             foreach (var t in all)
             {
@@ -5040,10 +5337,38 @@ namespace LiquidWobbleMPB
                 if (cc == exclude) { if (dbg != null) dbg.AppendLine().Append("   ").Append(who).Append(": REJECT - is the receiver herself"); continue; }
                 if (shownOnly && !IsCharacterShown(cc)) { if (dbg != null) dbg.AppendLine().Append("   ").Append(who).Append(": REJECT - character is hidden"); continue; }
                 if (!MEBridge.HasPenisMaterial(cc)) { if (dbg != null) dbg.AppendLine().Append("   ").Append(who).Append(": REJECT - no cm_m_dankon material"); continue; }
+                Transform baseBone = (byBase || dbg != null) ? FindChild(cc.transform, PenisBaseBone) : null;
+                float baseDist = (baseBone != null && mouth.HasValue) ? (baseBone.position - mouth.Value).magnitude : float.MaxValue;
+                bool preSet = byBase && PenisAlreadySetUp(t, myTarget, cc, seatBone, ownMouth, livePairs);
+                if (byBase)
+                {
+                    string why = null;
+                    if (baseBone == null) why = "no " + PenisBaseBone + " bone";
+                    else if (!MainGameWomb.IsMaleChara(cc) && !MEBridge.HasVisiblePenisMesh(cc)) why = "a female whose penis is hidden";
+                    else if (!preSet && baseDist > KeyClaimRange)
+                        why = "penis base " + (baseDist * 100f).ToString("F0") + "cm from her canal mouth (limit " + (KeyClaimRange * 100f).ToString("F0") + "cm)";
+                    if (why != null) { if (dbg != null) dbg.AppendLine().Append("   ").Append(who).Append(": REJECT - ").Append(why); continue; }
+                }
                 float dist = (t.position - pos).magnitude;
                 string dists = "toTarget=" + (dist * 1000f).ToString("F0") + "mm"
                              + (mouth.HasValue ? "  toMouth=" + ((t.position - mouth.Value).magnitude * 1000f).ToString("F0") + "mm" : "")
                              + "  end@" + t.position.ToString("F2");
+                if (dbg != null)
+                {
+                    // Where this character physically is, as opposed to where his aim node was left: the
+                    // penis base, whose orifice his entry node is linked to, and whom BP binds him to.
+                    Transform entryNode = FindChild(cc.transform, DanEntryBone);
+                    Transform entryHolder = entryNode != null ? NodeConstraintBridge.ParentOfChild(entryNode) : null;
+                    Component entryOwner = entryHolder != null ? FindChaControlOf(entryHolder) : null;
+                    Component bpHer = BPBridge.CollisionCharacterOf(cc);
+                    dists += "  " + (MainGameWomb.IsMaleChara(cc) ? "male" : "FEMALE")
+                           + " penisShown=" + MEBridge.HasVisiblePenisMesh(cc)
+                           + (baseBone != null && mouth.HasValue
+                              ? "  BASE toMouth=" + (baseDist * 1000f).ToString("F0") + "mm base@" + baseBone.position.ToString("F2")
+                              : "  base=?")
+                           + "  entry<-" + (entryHolder != null ? "'" + entryHolder.name + "' [" + (entryOwner != null ? entryOwner.name : "item") + "]" : "nothing")
+                           + "  BPbinds=" + (bpHer != null ? bpHer.name : "none");
+                }
                 if (myTarget != null)
                 {
                     Transform holder = NodeConstraintBridge.ParentOfChild(t);
@@ -5076,12 +5401,20 @@ namespace LiquidWobbleMPB
                     }
                 }
                 else if (dbg != null) dbg.AppendLine().Append("   ").Append(who).Append(": ").Append(dists);
-                float d = (t.position - pos).sqrMagnitude; if (d < bsq) { bsq = d; best = t; owner = cc; }
+                if (preSet && dbg != null) dbg.Append("  -> already set up with her, kept");
+                float d = byBase ? baseDist * baseDist : (t.position - pos).sqrMagnitude;
+                if (preSet && d < bssq) { bssq = d; bestSet = t; ownerSet = cc; }
+                if (d < bsq) { bsq = d; best = t; owner = cc; }
             }
+            bool keptSet = bestSet != null;
+            if (keptSet) { best = bestSet; owner = ownerSet; bsq = bssq; }
+            if (best != null) claimDist = Mathf.Sqrt(bsq);
             if (dbg != null)
             {
                 dbg.AppendLine().Append("   => ").Append(best == null ? "NO CANDIDATE SURVIVED"
-                    : "chose '" + (owner != null ? owner.name : "?") + "' at " + (Mathf.Sqrt(bsq) * 1000f).ToString("F0") + "mm");
+                    : "chose '" + (owner != null ? owner.name : "?") + "' at " + (claimDist * 1000f).ToString("F0") + "mm"
+                      + (byBase ? " (penis base to her canal mouth)" : " (tip to penis_target)")
+                      + (keptSet ? " - already set up with her, distance did not decide" : ""));
                 LiquidWobbleMPBPlugin._logger?.LogWarning(dbg.ToString());
             }
             return best;

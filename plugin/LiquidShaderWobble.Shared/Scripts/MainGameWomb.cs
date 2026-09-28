@@ -1073,6 +1073,30 @@ namespace LiquidWobbleMPB
             catch (Exception e) { return "  scan failed: " + e.Message; }
         }
 
+        // CACHED target female, for callers that ask EVERY FRAME. FindTargetFemale below scans every Transform in
+        // the scene; measured in H it cost 2.0ms per frame out of a 2.3ms total - the entire "fps drop
+        // after enabling the womb". Its answer changes only when the H scene changes girls, so it is re-resolved on
+        // the events that can do that: any PoseVersion bump (the ChangeAnimator postfix - switching girls in a 3P
+        // scene goes through an animation change) and a character reload (InvalidateTargetFemale), plus a slow
+        // insurance re-resolve so a missed event cannot leave it stale for the session. Exactly the shape of
+        // WombExpandEffect's vagina-root cache, and for the same reason. A destroyed character reads null here
+        // (Unity's == null) and re-resolves by itself. The hotkey path still calls FindTargetFemale() directly -
+        // it runs once per press and must see the live answer.
+        private static Component s_targetFemale;
+        private static int s_targetFemalePose = int.MinValue;
+        private static float s_targetFemaleNext;
+        internal static void InvalidateTargetFemale() { s_targetFemale = null; s_targetFemalePose = int.MinValue; }
+        internal static Component CachedTargetFemale()
+        {
+            if (s_targetFemale == null || s_targetFemalePose != PoseVersion || Time.unscaledTime >= s_targetFemaleNext)
+            {
+                s_targetFemale = FindTargetFemale();
+                s_targetFemalePose = PoseVersion;
+                s_targetFemaleNext = Time.unscaledTime + 3f;
+            }
+            return s_targetFemale;
+        }
+
         internal static Component FindTargetFemale()
         {
             Vector3 eye = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
@@ -3018,6 +3042,13 @@ namespace LiquidWobbleMPB
 
         private void Update()
         {
+            long t0 = Perf.Start();
+            try { UpdateBody(); }
+            finally { Perf.Stop(Perf.HUpdate, t0); }
+        }
+
+        private void UpdateBody()
+        {
             UpdateProxy();
             // EVENT-DRIVEN re-bind check: a pose change is the moment BP re-inits things - run
             // the watchdog tick NOW instead of up to 2s later. The 2s poll stays as the TESTING
@@ -3198,6 +3229,8 @@ namespace LiquidWobbleMPB
         private Transform[] _theirs;
         private Transform _pivot;          // wearer's cf_j_kokan - the scale anchor (entrance stays put)
         private Material _liquid;          // instanced CloXray/Liquid material (fill push)
+        private float _liquidSearchNext, _liquidSearchFirst;   // 1s retry cadence for the search above, and when it started
+        private bool _liquidMissingLogged;                     // the lasting miss is reported once, not every retry
         private float _lastFill = -1f;
         private WombExpandEffect _fx;      // engaged-state source (pull-out detection)
         // PULL-OUT cum flow: when the penis withdraws with cum in the womb, the cum flows womb->canal
@@ -3276,10 +3309,16 @@ namespace LiquidWobbleMPB
 
         private void LateUpdate()
         {
-            SyncNow();
-            PushFill();
-            EnsureMoundDown();
-            EnsureDome();
+            Perf.FrameMark();
+            long t0 = Perf.Start();
+            try
+            {
+                long t = Perf.Start(); try { SyncNow(); }          finally { Perf.Stop(Perf.HSync, t); }
+                t = Perf.Start();      try { PushFill(); }         finally { Perf.Stop(Perf.HFill, t); }
+                t = Perf.Start();      try { EnsureMoundDown(); }  finally { Perf.Stop(Perf.HMound, t); }
+                t = Perf.Start();      try { EnsureDome(); }       finally { Perf.Stop(Perf.HDome, t); }
+            }
+            finally { Perf.Stop(Perf.HLate, t0); }
         }
 
         // EPOCH COHERENCE - the womb syncs ONLY at LateUpdate now. The trace proved the bug:
@@ -3469,7 +3508,8 @@ namespace LiquidWobbleMPB
         private void UpdateCumFill()
         {
             // A different girl starts clean; the same girl keeps what she has through any respawn.
-            Component owner = MainGameWomb.FindTargetFemale();
+            // CACHED: the raw finder scans the whole scene and this runs every frame - see CachedTargetFemale.
+            Component owner = MainGameWomb.CachedTargetFemale();
             if (owner != null && !ReferenceEquals(owner, s_cumOwner))
             {
                 if (s_cumOwner != null)
@@ -3728,19 +3768,41 @@ namespace LiquidWobbleMPB
 
         private void PushFill()
         {
-            WatchFinish();
-            FeedPenetrationState();   // game's own penetrated/pulled-out flag -> womb gate
-            UpdateCumFill();   // rise-to-peak / settle state machine drives _burst
+            long tw = Perf.Start(); try { WatchFinish(); }          finally { Perf.Stop(Perf.HWatchFin, tw); }
+            tw = Perf.Start();      try { FeedPenetrationState(); } finally { Perf.Stop(Perf.HPenState, tw); }   // game's own penetrated/pulled-out flag -> womb gate
+            tw = Perf.Start();      try { UpdateCumFill(); }        finally { Perf.Stop(Perf.HCumFill, tw); }    // rise-to-peak / settle state machine drives _burst
 
             if (_liquid == null)
             {
-                foreach (var r in GetComponentsInChildren<Renderer>(true))
+                // ONCE A SECOND, AND MATCHED ON sharedMaterials. Renderer.materials INSTANTIATES a copy of every
+                // material it touches, so the old loop - which ran on EVERY frame for as long as the material was
+                // missing - re-instanced every renderer under the womb, every frame, forever: a material leak and a
+                // per-frame cost on exactly the installs where something is wrong (shader zipmod older than the DLL,
+                // a renamed shader, the materials already instanced by someone else). Only the renderer that really
+                // carries the liquid is instanced now, the retry is cheap, and a lasting miss says so once.
+                if (Time.unscaledTime >= _liquidSearchNext)
                 {
-                    if (r == null || r.sharedMaterials == null) continue;
-                    var mats = r.materials;   // instanced - never edit the shared bundle material
-                    foreach (var m in mats)
-                        if (m != null && m.shader != null && m.shader.name == "CloXray/Liquid") { _liquid = m; _liquidRend = r; break; }
-                    if (_liquid != null) break;
+                    if (_liquidSearchFirst <= 0f) _liquidSearchFirst = Time.unscaledTime;
+                    _liquidSearchNext = Time.unscaledTime + 1f;
+                    foreach (var r in GetComponentsInChildren<Renderer>(true))
+                    {
+                        if (r == null || r.sharedMaterials == null) continue;
+                        bool carries = false;
+                        var shared = r.sharedMaterials;
+                        for (int i = 0; i < shared.Length && !carries; i++)
+                            carries = shared[i] != null && shared[i].shader != null && shared[i].shader.name == "CloXray/Liquid";
+                        if (!carries) continue;
+                        var mats = r.materials;   // instanced - never edit the shared bundle material
+                        foreach (var m in mats)
+                            if (m != null && m.shader != null && m.shader.name == "CloXray/Liquid") { _liquid = m; _liquidRend = r; break; }
+                        if (_liquid != null) break;
+                    }
+                    if (_liquid == null && !_liquidMissingLogged && Time.unscaledTime - _liquidSearchFirst > 5f)
+                    {
+                        _liquidMissingLogged = true;
+                        LiquidWobbleMPBPlugin._logger?.LogError("CloXray: no CloXray/Liquid material under the H womb after 5s - the cum fill does"
+                            + " nothing for this scene. The shader zipmod does not match this DLL, or something renamed the material. Nothing applied.");
+                    }
                 }
                 if (_liquid == null) return;
                 // Free-H cum belongs in the WOMB, not the canal: switch this instance to CLOSED mode

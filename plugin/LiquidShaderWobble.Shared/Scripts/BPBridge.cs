@@ -747,6 +747,23 @@ namespace LiquidWobbleMPB
             return Vector3.zero;
         }
 
+        // The named character's k_f_dan_entry node itself, so NodesConstraints can be asked what drives it.
+        // Null if the controller or the bone is gone.
+        public static Transform GetEntryBone(string charName)
+        {
+            if (string.IsNullOrEmpty(charName)) return null;
+            Init();
+            if (_ctrlType == null) return null;
+            EnsureCache();
+            for (int i = 0; i < _cache.Length; i++)
+            {
+                var oc = _cache[i] as Component;
+                if (oc == null || oc.gameObject.name != charName) continue;
+                return (i < _entryBones.Length) ? _entryBones[i] : null;
+            }
+            return null;
+        }
+
         // POST-NC read of a named male's k_f_dan_end (the AIMED tip - driven deep by a penis_target NodesConstraint).
         // Call from onPreCull. Vector3.zero if gone. (The cm_j_dan deepest bone gets squished shallow by BP; this is
         // the actual deep visual tip when the penis is aimed via NC.)
@@ -1061,7 +1078,7 @@ namespace LiquidWobbleMPB
         // and a thick one) each ring reacts to the thickest thing reaching it. The single deepest collider still
         // drives the engagement DEPTH (tip/base/driveAlong) below.
         public static bool TryReadNearCanal(Vector3 entrance, Vector3 axisDir, float maxRange, float lateralMax, float canalLen, float maxRadius, float bulbRadius, string nameFilter,
-            float[] ringDepths, float[] outRingRadius,
+            float[] ringDepths, float[] outRingRadius, float ringPad,
             out Vector3 tip, out Vector3 baseEnd, out float radiusWorld, out float driveAlong, out float lateralOut, out string chosenName)
         {
             tip = baseEnd = Vector3.zero; radiusWorld = 0f; driveAlong = 0f; lateralOut = 0f; chosenName = null;
@@ -1162,7 +1179,9 @@ namespace LiquidWobbleMPB
                     for (int rk = 0; rk < ringDepths.Length && rk < outRingRadius.Length; rk++)
                     {
                         float ra = ringDepths[rk] * canalLen;
-                        if (ra >= nearAlong && ra <= reach && radW > outRingRadius[rk]) outRingRadius[rk] = radW;
+                        // ringPad widens the span so a SHORT object (a ball) still counts as covering the ring
+                        // nearest it instead of falling between two rings and opening neither. 0 = exact span.
+                        if (ra >= nearAlong - ringPad && ra <= reach + ringPad && radW > outRingRadius[rk]) outRingRadius[rk] = radW;
                     }
                 float drive = reach;                                     // depth tracks the deepest surface (responsive; fat/long colliders read deep)
                 if (drive <= best) continue;                             // keep the deepest

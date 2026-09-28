@@ -13,7 +13,7 @@ namespace LiquidWobbleMPB
     {
         public const string Guid = "Clo.LiquidWobbleMPB";
         public const string Name = "LiquidWobbleMPB";
-        public const string Version = "1.1.5";
+        public const string Version = "1.1.6";
 
         // The gated view of the log sink: null = silent, and every `_logger?.LogX(...)` in the plugin
         // is a no-op. Never assign it directly - ApplyLogVisibility() owns it.
@@ -44,6 +44,7 @@ namespace LiquidWobbleMPB
         private static ConfigEntry<bool> _cfgAutoBodyReveal;
         private static ConfigEntry<KeyboardShortcut> _cfgAutoBodyRevealKey;
         private static ConfigEntry<KeyboardShortcut> _cfgStudioPairKey;
+        private static ConfigEntry<KeyboardShortcut> _cfgStudioAnalKey;
         private static ConfigEntry<bool> _cfgBodyVeil;
         private static ConfigEntry<bool> _cfgLimbMask;
         private static ConfigEntry<bool> _cfgClothesReveal;
@@ -267,7 +268,10 @@ namespace LiquidWobbleMPB
                 "Manually (re)apply BodyReveal to every character near a CloXray womb. Use after first placing a womb, or after dragging one onto a different character. (Shift+Alt+X. Rebind here if it ever collides with another plugin.)");
 
             _cfgStudioPairKey = Config.Bind(brSec, "Studio: womb + pair hotkey", new KeyboardShortcut(KeyCode.W, KeyCode.LeftControl, KeyCode.LeftShift),
-                "STUDIO only. Select a girl and press: if she has no womb one is added for her, parented to her and placed, then the whole x-ray is applied - no need to find the item and drop it in. Press again to move her to the next stencil pair, which is how a second or third girl in one scene gets her own (two girls sharing a pair see each other's organs). After the last pair it removes her x-ray and womb, and the next press starts over. (Ctrl+Shift+W.)");
+                "STUDIO only. Select a girl and press: if she has no VAGINAL womb one is added for her, parented to her and placed, then the whole x-ray is applied - no need to find the item and drop it in. Press again to move her to the next stencil pair, which is how a second or third girl in one scene gets her own (two girls sharing a pair see each other's organs). After the last pair it removes her x-ray and womb, and the next press starts over. Select a WOMB instead of a girl and it sets up that womb alone, taking the penis aimed nearest it - that is how a womb anywhere else, or one worn by nobody, gets wired. (Ctrl+Shift+W.)");
+
+            _cfgStudioAnalKey = Config.Bind(brSec, "Studio: anal womb hotkey", new KeyboardShortcut(KeyCode.A, KeyCode.LeftControl, KeyCode.LeftShift),
+                "STUDIO only. The same thing for her ANUS: select a girl and press to add Xray Womb 2 at her anus point with its uterus collapsed (a plain canal), on her current stencil pair, then apply the x-ray and take the penis. It manages the womb hanging in that anus point and no other - a womb she wears anywhere else is set up by selecting that womb and pressing the pair key. It never walks the stencil cycle either; the pair hotkey owns that. (Ctrl+Shift+A. Vanilla Studio also resets the camera on a bare A; rebind here if that gets in the way.)");
 
             _cfgReactColliders = Config.Bind("WombExpand", "React to colliders", true,
                 "When NO BP penis is engaged, also react to the nearest DynamicBoneCollider (e.g. a BP collider you place and size with KKPE on a bottle/toy). The womb opens and displaces from the collider's deeper capsule end (treated as the tip) and its radius (girth), exactly like a penis. READ-ONLY: the collider itself is never modified. A real BP penis always takes priority.");
@@ -414,11 +418,22 @@ namespace LiquidWobbleMPB
 
         private void Update()
         {
+            // The frame mark lives HERE as well as in the womb drives so the PERF line has a BASELINE: with no womb
+            // (or with the master toggle off, which stops those drives) it still prints the frame time with ours at
+            // zero, which is the only way to compare one machine before a womb is added against the same machine after.
+            Perf.FrameMark();
+            long tu = Perf.Start();
+            try { UpdateBody(); }
+            finally { Perf.Stop(Perf.PluginUpdate, tu); }
+        }
+
+        private void UpdateBody()
+        {
             // Hotkey + live config only - NO per-frame scanning/applying (that's event-driven).
             // (PumpRegionMasks is a bounded queue, empty in steady state - it exists because ME's
             // shader flip is deferred and the torso mask must be set AFTER it lands.)
-            MEBridge.PumpRegionMasks();
-            MEBridge.PumpMaskWatch();       // masks cannot persist in ME records - re-assert after body rebuilds
+            long tm = Perf.Start();
+            try { MEBridge.PumpRegionMasks(); MEBridge.PumpMaskWatch(); } finally { Perf.Stop(Perf.MePumps, tm); }       // masks cannot persist in ME records - re-assert after body rebuilds
             if (_cfgAutoBodyReveal != null)      AutoBodyReveal.Enabled  = CfgEnabled && _cfgAutoBodyReveal.Value;   // master OFF disables the auto-apply path too
             if (_cfgDebugLog != null)            AutoBodyReveal.Debug    = CfgDebugLog;   // honours ForceDiagnosticsForTester
             // One-shot respawn after the forced uncensor body reload (see MainGameWomb.RespawnAt):
@@ -490,7 +505,9 @@ namespace LiquidWobbleMPB
                     AutoBodyReveal.ApplyAll();
                 if (CfgEnabled && _cfgStudioPairKey != null && ComboDown(_cfgStudioPairKey.Value))
                     StudioPairWomb.Trigger();
-                StudioPairWomb.Tick();   // finishes an add once the new item's own component is up
+                if (CfgEnabled && _cfgStudioAnalKey != null && ComboDown(_cfgStudioAnalKey.Value))
+                    StudioPairWomb.Trigger(true);
+                { long ts = Perf.Start(); try { StudioPairWomb.Tick(); } finally { Perf.Stop(Perf.StudioTick, ts); } }   // finishes an add once the new item's own component is up
 
             }
             else

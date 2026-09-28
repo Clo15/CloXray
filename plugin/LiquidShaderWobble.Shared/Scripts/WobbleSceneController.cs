@@ -22,6 +22,10 @@ namespace LiquidWobbleMPB
         // womb. The womb is a Studio ITEM and this is CloXray's state, not a MaterialEditor edit, so it
         // rides in CloXray's own scene data. Absent = a scene saved before that record existed -> the legacy repair runs.
         private const string WombKey = "wombPairStack";
+        // Studio saves nothing about an item's blendshapes, and the anal womb's uterus is collapsed with one
+        // (WombExpandEffect.CollapseShape). Without this the dome comes back on the next load. One owner id per
+        // womb that carries it; absent = no such womb, exactly as every scene saved before this.
+        private const string CollapsedKey = "wombCollapsed";
 
         // ── Deferred on-load BodyReveal re-apply host ─────────────────────────────────────────────────────
         // AutoBodyReveal.OnCharacterReloaded is a STATIC handler with no coroutine host. Route its re-apply
@@ -120,8 +124,8 @@ namespace LiquidWobbleMPB
             try { return oa.Select(Convert.ToInt32).ToArray(); } catch { return null; }
         }
 
-        /// Put every womb back on the pair and stack it was saved with. A scene that
-        /// carries that record has it restored verbatim. An older scene carries no record
+        /// Put every womb back on the pair and stack it was saved with. A scene saved by a recent build
+        /// carries that record and it is restored verbatim. An older scene carries no record
         /// OF OURS - but that is not the same as carrying nothing, and treating it as nothing is what
         /// made this pass rewrite scenes that were perfectly fine.
         ///
@@ -132,11 +136,11 @@ namespace LiquidWobbleMPB
         /// back on pair 1 while she is on another - and it writes no queue at all.
         ///
         /// SAFE ON OLD SCENES:
-        ///   - a womb with no wearer, or a wearer with no body stamp, is left completely alone;
-        ///   - the pair is copied from HER stamp, so it can only ever agree with her, never invent;
-        ///   - a material the scene spoke for keeps what the scene said, whatever her stamp reads;
-        ///   - queues are the hotkey's, so a scene authored on the shipped tags still loads on them.
-        private System.Collections.IEnumerator RestoreWombState(int[] rec)
+        /// - a womb with no wearer, or a wearer with no body stamp, is left completely alone;
+        /// - the pair is copied from HER stamp, so it can only ever agree with her, never invent;
+        /// - a material the scene spoke for keeps what the scene said, whatever her stamp reads;
+        /// - queues are the hotkey's, so a scene authored on the shipped tags still loads on them.
+        private System.Collections.IEnumerator RestoreWombState(int[] rec, int[] collapsed)
         {
             // MaterialEditor restores her body stamp on its own schedule; the repair reads that stamp, so
             // wait for the wombs to exist and give ME a moment to land. Same reasoning as ReattachWhenLiquid.
@@ -150,6 +154,31 @@ namespace LiquidWobbleMPB
 
             var dic = Studio.Studio.Instance != null ? Studio.Studio.Instance.dicObjectCtrl : null;
             if (dic == null) yield break;
+
+            // The collapsed uterus of an anal womb: a hand-set blendshape Studio does not save, so it is put back
+            // from the plugin's own record - and only where the mesh still sits at the shipped 0, never over a value the
+            // scene (or its author in KKPE) has since given it.
+            if (collapsed != null)
+                foreach (int id in collapsed)
+                {
+                    ObjectCtrlInfo oci;
+                    if (!dic.TryGetValue(id, out oci) || oci == null || oci.guideObject == null) continue;
+                    var tt = oci.guideObject.transformTarget;
+                    if (tt == null) continue;
+                    foreach (var w in tt.GetComponentsInChildren<WombExpandEffect>(true))
+                    {
+                        if (w == null) continue;
+                        float cur = w.HandShape(WombExpandEffect.CollapseShape);
+                        if (cur < 0f)   // -1 is "no mesh yet" as well as "no channel" - say which, never skip quietly
+                            LiquidWobbleMPBPlugin._logger?.LogError("CloXray: womb '" + w.name + "' was saved with its"
+                                + " uterus collapsed, but " + (w.Ready ? "its mesh has no '" + WombExpandEffect.CollapseShape
+                                + "' channel" : "it had not finished starting") + " - the dome is back up.");
+                        else if (cur < 1f && w.SetHandShape(WombExpandEffect.CollapseShape, 100f))
+                            LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: womb '" + w.name
+                                + "' was saved with its uterus collapsed (anal womb) - put back.");
+                        break;
+                    }
+                }
 
             if (rec != null && rec.Length >= 3)
             {
@@ -271,12 +300,12 @@ namespace LiquidWobbleMPB
                 }
 
             // Every womb's pair + stack, so a load restores exactly what was on screen.
-            // key each womb by the studio object that OWNS it - the DEEPEST guide target it sits
+            // Key each womb by the studio object that OWNS it - the DEEPEST guide target it sits
             // under - not by every object it happens to be inside. Scanning the dictionary instead
             // recorded a womb parented to a character under her id as well as its own ("24 wombs" for a
             // scene with 9), and a woman wearing TWO wombs would then have one id resolving to whichever
             // of them GetComponentInChildren returned first. Same ownership rule as the aim takeover.
-            List<int> wombs = null;
+            List<int> wombs = null, collapsed = null;
             if (dic != null)
                 foreach (var w in UnityEngine.Object.FindObjectsOfType<WombExpandEffect>())
                 {
@@ -300,11 +329,17 @@ namespace LiquidWobbleMPB
                     }
                     if (wombs == null) wombs = new List<int>();
                     wombs.Add(ownerKey); wombs.Add(st); wombs.Add(up ? 1 : 0);
+                    if (w.HandShape(WombExpandEffect.CollapseShape) >= 99f)
+                    {
+                        if (collapsed == null) collapsed = new List<int>();
+                        collapsed.Add(ownerKey);
+                    }
                 }
 
-            if (ids == null && wombs == null) { SetExtendedData(null); return; }
+            if (ids == null && wombs == null && collapsed == null) { SetExtendedData(null); return; }
             var data = new PluginData();
             if (ids != null) data.data[ItemsKey] = ids.ToArray();
+            if (collapsed != null) data.data[CollapsedKey] = collapsed.ToArray();
             if (wombs != null)
             {
                 data.data[WombKey] = wombs.ToArray();
@@ -464,9 +499,10 @@ namespace LiquidWobbleMPB
 
             var data = GetExtendedData();
             // Womb pair+stack: restore the record if the scene carries it, otherwise repair an older scene.
-            object rawW = null;
+            object rawW = null, rawC = null;
             if (data != null) data.data.TryGetValue(WombKey, out rawW);
-            StartCoroutine(RestoreWombState(ToIntArray(rawW)));
+            if (data != null) data.data.TryGetValue(CollapsedKey, out rawC);
+            StartCoroutine(RestoreWombState(ToIntArray(rawW), ToIntArray(rawC)));
 
             object raw;
             if (data == null || !data.data.TryGetValue(ItemsKey, out raw) || raw == null) return;
