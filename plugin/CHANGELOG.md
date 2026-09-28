@@ -2,7 +2,7 @@
 
 Moved out of the inline `PluginBuild` comment in `LiquidShaderWobbleEffect.cs` for source clarity. Newest first.
 
-- **1219 = RELEASE 1.1.6** - Free-H performance, and her anus gets its own hotkey. Ships with womb 7.5.4.
+- **1230 = RELEASE 1.1.6** - Free-H performance, and her anus gets its own hotkey. Ships with womb 7.5.5.
   User-visible:
 
   - **Free-H is about 2ms a frame lighter** (b1217). A scene-wide scan ran on EVERY frame to answer a

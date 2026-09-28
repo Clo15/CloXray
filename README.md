@@ -15,6 +15,26 @@ lines up even on odd-sized characters (very small or very large girls and males 
 sizing tables for common animations ship with the mod; anything unknown is learned after a
 single stroke and remembered.
 
+### New in 1.1.6
+
+- **Free-H costs about 2ms a frame less.** A scene-wide search ran every single frame to answer a
+  question that only changes when the scene does; the plugin's own cost during H fell from 2.33ms to
+  0.30ms a frame. Turn on *Diagnostic log* and the log reports that share every second.
+- **`Ctrl+Shift+A` sets up a womb at her anus**, on the stencil pair she is already using.
+  `Ctrl+Shift+W` handles her vaginal womb; press it with a womb selected and that womb alone is
+  wired, taking the penis aimed nearest it - which is how a womb worn anywhere else gets set up.
+- **New per-womb slider `BP_IndependentRings`.** At 0 the canal behaves as before: a ring opens when
+  something reaches it and stays open while that thing is deeper. Above 0 each ring reacts only to
+  what is beside it, so a toy opens one ring at a time as it travels, and the value sets how wide a
+  band travels with it (about 20 grips a ball tightly). Colliders only - a BetterPenetration penis
+  spans every ring behind its tip either way.
+- **The penis sits in the middle of the opened canal** instead of against its front wall.
+- **A womb away from the default spot reacts at its real depth**, and only the womb on her vagina
+  takes BetterPenetration's entry link - an anal, second or free-standing womb is entered at its own
+  canal mouth.
+- **The one-key setup says so when the male's uncensor is not BetterPenetration**, instead of
+  looking for a penis it cannot find.
+
 ### Fixed in 1.1.5
 
 - **Toys** open the canal the way they did in 1.1.3 again.
