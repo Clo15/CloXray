@@ -31,6 +31,17 @@ Moved out of the inline `PluginBuild` comment in `LiquidShaderWobbleEffect.cs` f
     every ring behind it open, and the value sets how wide a band travels with the object (about 20 grips a
     ball tightly). Colliders only - a BetterPenetration penis spans every ring behind its tip either way.
     Asked for by a scene creator.
+  - **A stretched canal keeps its grip** (b1231). Ring positions and the "still in the canal" test were
+    measured on the canal at rest, so once `womb_displace` pushed the cervix away they sat short of where
+    the rings are drawn: an object plainly still inside covered none of them and, with independent rings,
+    every ring closed - the bulge vanished at exactly the moment the womb stretched. Those questions are
+    now asked on the canal as drawn. Depth is unchanged: it still reads overshoot against the unstretched
+    canal, which is what makes the stretch a response to the push rather than its own undoing.
+  - **Switching a male's uncensor no longer unpairs the womb** (b1232). An uncensor swap is a PARTIAL body
+    reload: it remakes the penis bones but raises none of the events a full character load does, so the womb
+    silently lost its penis and the canal stopped reacting - BetterPenetration carried on, which made it look
+    like the womb alone had broken - until the hotkey was pressed. The swap is now one of the events that
+    re-pairs. Still event-driven: nothing is polled and nothing extra runs per frame.
   - **A womb the key adds is wired only once it has finished starting** (b1210) - that race was silently
     skipping the collapsed uterus and the penis entry link on a freshly added womb.
 

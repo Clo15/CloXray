@@ -3429,13 +3429,45 @@ namespace LiquidWobbleMPB
             _done.Remove(id);
         }
 
+        /// Install the hook WITHOUT waiting for the plugin to swap an uncensor itself.
+        ///
+        /// Install() is otherwise reachable only through Arm(), and only Free-H's forced-BP-uncensor path arms
+        /// it. Nothing in Studio does, so without this the patch is never applied there and a hand-made uncensor
+        /// change raises nothing at all: the womb loses its penis and stays unpaired until the hotkey. Called from
+        /// InstallWombHooks, so the patch exists exactly while a womb is in the scene and a CloXray-free scene
+        /// is still never patched. Costs one assembly scan, once, and retries until UncensorSelector is loaded.
+        internal static void EnsureInstalled()
+        {
+            if (_installed) return;
+            Type found = null;
+            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (a.FullName == null || a.FullName.IndexOf("UncensorSelector", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                try
+                {
+                    foreach (var t in a.GetTypes())
+                        if (t.Name == "UncensorSelectorController") { found = t; break; }
+                }
+                catch { }   // an assembly that cannot enumerate its types is simply not the one
+                if (found != null) break;
+            }
+            if (found == null) return;   // UncensorSelector not loaded yet - the next womb hook install retries
+            InstallType(found);
+        }
+
         private static void Install(Component ctl)
         {
             if (_installed || ctl == null) return;
+            InstallType(ctl.GetType());
+        }
+
+        private static void InstallType(Type controllerType)
+        {
+            if (_installed || controllerType == null) return;
             _installed = true;
             try
             {
-                var m = ctl.GetType().GetMethod("ReloadCharacterBody", BF);
+                var m = controllerType.GetMethod("ReloadCharacterBody", BF);
                 if (m == null) { LiquidWobbleMPBPlugin._logger?.LogError("CloXray: UncensorSelector.ReloadCharacterBody not found - the carry-over completion event cannot be hooked."); return; }
                 if (_harmony == null) _harmony = new Harmony("Clo.LiquidWobbleMPB.uncreload");
                 _harmony.Patch(m, postfix: new HarmonyMethod(typeof(UncBodyReloadWatch).GetMethod(nameof(Postfix), BindingFlags.Static | BindingFlags.NonPublic)));
@@ -3456,6 +3488,16 @@ namespace LiquidWobbleMPB
                 // A body rebuild replaces the material the renderer draws, so the clothing alpha mask
                 // has to be re-pushed onto the new one.
                 BodyMaterialFix.AdoptRenderedBodyMaterial(cc, "after an uncensor body rebuild");
+                // The rebuild also destroys and remakes the penis bones, and a womb pairs to a penis by its
+                // k_f_dan_entry. A FULL character (re)load re-pairs through OnCharacterReloaded, but this is a
+                // PARTIAL reload and raises no such event, so switching a male's uncensor silently unpaired every
+                // womb: the canal stopped reacting while BP - which rebuilds its own targets here - carried on,
+                // and only the hotkey brought it back. Event-driven, same as every other re-pair: nothing is
+                // polled and nothing extra runs per frame.
+                BPBridge.InvalidateBoneCache();   // ORDER: fresh bones first, so the re-pair below can see them
+                WombExpandEffect.RequestRepair();
+                LiquidWobbleMPBPlugin._logger?.LogInfo("CloXray: '" + cc.name + "' finished an uncensor body rebuild"
+                    + " - bone cache dropped, every womb re-pairs on its next post-IK frame.");
             }
             catch { }
         }
@@ -3771,6 +3813,7 @@ namespace LiquidWobbleMPB
             // REDUNDANT re-add (whichever side gets there first, the other no-ops) and the FK enforcer acts
             // only while BP is actively driving.
             NodeConstraintBridge.InstallPairingHooks();   // instant womb<->penis re-pair on any k_f_dan_entry NodesConstraint add/enable/disable/delete
+            UncBodyReloadWatch.EnsureInstalled();         // an uncensor swap remakes the penis bones -> re-pair (Studio never armed this itself)
         }
 
         // A scene LOAD and a character REPLACEMENT both arrive as CharacterReloaded, but they need

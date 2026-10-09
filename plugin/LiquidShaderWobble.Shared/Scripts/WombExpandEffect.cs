@@ -1862,7 +1862,51 @@ namespace LiquidWobbleMPB
         {
             int n = _ringIdx != null ? _ringIdx.Length : 0;
             if (n < 2 || _canalLen <= 1e-4f) return 0.01f;
-            return Mathf.Abs(DepthEnd - DepthStart) / (n - 1) * _canalLen;
+            return Mathf.Abs(DepthEnd - DepthStart) / (n - 1) * CanalLenLive();
+        }
+
+        private bool _liveLenUnmeasured;   // the one-shot complaint below
+
+        /// The canal's length AS DRAWN: the reference canal plus however far womb_displace has already pushed
+        /// the cervix away this frame.
+        ///
+        /// Anything asking WHERE SOMETHING IS in the canal - where each ring sits, whether a collider is still
+        /// inside - is a question about the mesh on screen and has to be asked in this frame. Asked against the
+        /// reference canal instead, the rings sit short of where they are drawn, so a deeply pushed object that
+        /// is plainly still in the canal covers none of them: with independent rings every ring then closes and
+        /// the bulge disappears at exactly the moment the womb stretches (reported in Studio, toy + independent
+        /// rings, and reproduced by closing the slider at the same spot).
+        ///
+        /// DEPTH deliberately does NOT come from here. The drive measures overshoot against the UNSTRETCHED
+        /// canal, which is what makes the stretch a response to the push; measured against the stretched canal
+        /// it would cancel its own cause.
+        ///
+        /// Blendshape weight is linear in its deltas, so weight->travel is exact. What is assumed is the ramp
+        /// ALONG the canal: the mouth is anchored, the cervix travels the measured amount, and a ring at
+        /// fraction f is taken to move f of the way. To replace the assumption, measure each ring band's own
+        /// travel in the stretch-100 bake MeasureRestAndTravel already takes.
+        private float CanalLenLive()
+        {
+            if (_canalLen <= 1e-4f) return _canalLen;
+            // STUDIO ONLY. In H the resting womb_displace is ALREADY folded into _canalLen analytically
+            // (RefreshCanalWorld's base-stretch elongation, which the rest-mesh walk cannot see), and the live
+            // weight this reads contains that same resting part - correcting again would count it twice. H also
+            // never uses the per-ring collider path, so there is nothing there for this to fix.
+            if (!MainGameWomb.IsStudio) return _canalLen;
+            float w = (_stretchIdx >= 0 && _smr != null) ? _smr.GetBlendShapeWeight(_stretchIdx) : 0f;
+            if (w <= 0.01f) return _canalLen;
+            if (_displaceTravelFrac <= 0f)
+            {
+                if (!_liveLenUnmeasured)
+                {
+                    _liveLenUnmeasured = true;
+                    LiquidWobbleMPBPlugin._logger?.LogError("CloXray: womb '" + WombTag() + "' is displaced (womb_displace="
+                        + w.ToString("F0") + ") but its cervix travel was never measured, so the canal's drawn length is"
+                        + " unknown - ring positions and the in-canal test stay on the reference canal and will read short.");
+                }
+                return _canalLen;
+            }
+            return _canalLen * (1f + Mathf.Clamp01(w * 0.01f) * _displaceTravelFrac);
         }
 
         // The control sliders move no vertex, so they are neither baked nor watched.
@@ -3054,7 +3098,7 @@ namespace LiquidWobbleMPB
                     Vector3 ctip, cbase; float crad, cdrive, clat; string cname;
                     if (_canalLen > 1e-4f &&
                         ColliderBridge.TryReadNearCanal(_canalEntrance, _canalAxis, LiquidWobbleMPBPlugin.CfgColliderRange,
-                                                        LiquidWobbleMPBPlugin.CfgColliderInCanal, _canalLen, LiquidWobbleMPBPlugin.CfgColliderMaxRadius,
+                                                        LiquidWobbleMPBPlugin.CfgColliderInCanal, CanalLenLive(), LiquidWobbleMPBPlugin.CfgColliderMaxRadius,
                                                         WombBulbRadius(), LiquidWobbleMPBPlugin.CfgColliderNameForGame,
                                                         _ringDepths, _colRingRadius,
                                                         indepRings ? RingGapWorld() * 1.5f * Mathf.Clamp01(indepRingsW / 100f) : 0f,
