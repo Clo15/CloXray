@@ -357,9 +357,9 @@ namespace LiquidWobbleMPB
                         _displaceTravelFrac = moved / (_canalLen > 1e-5f ? _canalLen : _canalLocalLen);
                         LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: '" + name + "' displace travel measured: cervix moves "
                             + (moved * 1000f).ToString("F1") + "mm at weight 100 = " + _displaceTravelFrac.ToString("F3")
-                            + " of the canal (the drive has been assuming 0.500).");
+                            + " of the canal.");
                     }
-                    else LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: '" + name + "' displace travel probe read 0 - keeping the assumed 0.500.");
+                    else LiquidWobbleMPBPlugin._logger?.LogWarning("CloXray: '" + name + "' displace travel probe read 0 - the weight-to-travel mapping stays unknown, so the contact term and the drawn-canal correction are both skipped.");
                 }
 
                 // The MID band belongs to the width measurement below and to nothing else. It used to sit
