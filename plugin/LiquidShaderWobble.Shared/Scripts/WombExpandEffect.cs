@@ -1870,16 +1870,13 @@ namespace LiquidWobbleMPB
         /// The canal's length AS DRAWN: the reference canal plus however far womb_displace has already pushed
         /// the cervix away this frame.
         ///
-        /// Anything asking WHERE SOMETHING IS in the canal - where each ring sits, whether a collider is still
-        /// inside - is a question about the mesh on screen and has to be asked in this frame. Asked against the
-        /// reference canal instead, the rings sit short of where they are drawn, so a deeply pushed object that
-        /// is plainly still in the canal covers none of them: with independent rings every ring then closes and
-        /// the bulge disappears at exactly the moment the womb stretches (reported in Studio, toy + independent
-        /// rings, and reproduced by closing the slider at the same spot).
+        /// Ring positions and the in-canal test ask where things are on screen, so they have to be asked in
+        /// this frame. Against the reference canal the rings sit short of where they are drawn, and an object
+        /// pushed deep enough to stretch the womb covers none of them: with independent rings every ring then
+        /// closes and the bulge disappears at the moment the stretch starts, with the toy still inside.
         ///
-        /// DEPTH deliberately does NOT come from here. The drive measures overshoot against the UNSTRETCHED
-        /// canal, which is what makes the stretch a response to the push; measured against the stretched canal
-        /// it would cancel its own cause.
+        /// DEPTH does NOT come from here. The drive measures overshoot against the UNSTRETCHED canal, which is
+        /// what makes the stretch a response to the push; against the stretched canal it would cancel itself.
         ///
         /// Blendshape weight is linear in its deltas, so weight->travel is exact. What is assumed is the ramp
         /// ALONG the canal: the mouth is anchored, the cervix travels the measured amount, and a ring at
@@ -1890,8 +1887,8 @@ namespace LiquidWobbleMPB
             if (_canalLen <= 1e-4f) return _canalLen;
             // STUDIO ONLY. In H the resting womb_displace is ALREADY folded into _canalLen analytically
             // (RefreshCanalWorld's base-stretch elongation, which the rest-mesh walk cannot see), and the live
-            // weight this reads contains that same resting part - correcting again would count it twice. H also
-            // never uses the per-ring collider path, so there is nothing there for this to fix.
+            // weight this reads contains that same resting part - correcting again would count it twice. H
+            // never uses the per-ring collider path either.
             if (!MainGameWomb.IsStudio) return _canalLen;
             float w = (_stretchIdx >= 0 && _smr != null) ? _smr.GetBlendShapeWeight(_stretchIdx) : 0f;
             if (w <= 0.01f) return _canalLen;

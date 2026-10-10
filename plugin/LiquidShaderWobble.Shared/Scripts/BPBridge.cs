@@ -65,8 +65,8 @@ namespace LiquidWobbleMPB
         /// the penis bones are destroyed and remade while the controller itself - which lives on the character
         /// root - survives, so the staleness sweep in EnsureCache sees nothing wrong and keeps serving the dead
         /// k_f_dan_entry. Pairing then finds no penis, and because pairing is event-driven, nothing reads the
-        /// cache again to tick its timer: the womb stays unpaired until the hotkey is pressed. Costs one float
-        /// store, on an event that only happens when a body is swapped.
+        /// cache again to tick its timer: the womb stays unpaired until the hotkey is pressed. Runs only when
+        /// a body is swapped.
         public static void InvalidateBoneCache() { _refreshTimer = 0f; }
 
         public static bool Available => _ctrlType != null;
