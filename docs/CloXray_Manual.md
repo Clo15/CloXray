@@ -114,6 +114,9 @@ press `Shift+Alt+X` to attach the wobble.
 - Reacts whenever a BetterPenetration penis is inserted in the female the womb sits on - robust to a long or BP-squished penis and to a womb placed slightly off the exact canal line (it keys off insertion into *that female's vagina*, not just the narrow tube; a penis that isn't in her won't open it). Also reacts to a collider you push in (a toy/bottle carrying a DynamicBone collider); with both present, it follows whichever is deeper.
 - Works for a posed (static) penis, not just active thrusting. Withdraw the penis - or pull its tip away via a constraint/sphere on `k_f_dan_end` - and the womb closes. The canal decides: a tip below the canal mouth, or further off its centreline than the tube is wide, counts as out however the penis is aimed.
 - The deep dome (top of the womb, the `Vagina_6_entrance_open` shape) is manual - open it by hand with its KKPE slider; the auto reaction drives the entrance→cervix rings (V1-V5) only.
+- Each ring can react on its own instead of staying open behind the object - set the womb's
+  `BP_IndependentRings` shape above 0 and a toy opens one ring at a time as it travels (Studio,
+  colliders only; see the per-womb controls below).
 - Turn collider reaction off if you don't want it: globally via **BepInEx config (F1) → WombExpand → React to colliders**, or per-womb by setting the `BP_IgnoreColliders` shape (KKPE / StudioBlendShapes) above 50 - that one womb then ignores colliders and only reacts to a BP penis.
 
 ### Bottles & other items
@@ -327,9 +330,9 @@ They exist so that a per-womb *setting* saves with the scene, which an F1 config
   is what a shaft does to a canal. Any value above 0 makes each ring react only to what is actually
   beside it, so a small ball opens the ring it is passing through and the rings behind it close again -
   one ring at a time as it travels. The value is how wide a band travels with the object: around 20 is
-  a tight grip on a ball, 100 opens about a ring and a half either side. Studio only, and toys or other
-  colliders only;
-  a BetterPenetration penis is unaffected, since a shaft spans every ring behind its tip anyway.
+  a tight grip on a ball, 100 opens about a ring and a half either side. Studio only, and toys or
+  other colliders only: a BetterPenetration penis is unaffected, since a shaft spans every ring
+  behind its tip anyway.
 
 ## Slider reference (Material Editor)
 
