@@ -327,7 +327,8 @@ They exist so that a per-womb *setting* saves with the scene, which an F1 config
   is what a shaft does to a canal. Any value above 0 makes each ring react only to what is actually
   beside it, so a small ball opens the ring it is passing through and the rings behind it close again -
   one ring at a time as it travels. The value is how wide a band travels with the object: around 20 is
-  a tight grip on a ball, 100 opens about a ring and a half either side. Toys and other colliders only;
+  a tight grip on a ball, 100 opens about a ring and a half either side. Studio only, and toys or other
+  colliders only;
   a BetterPenetration penis is unaffected, since a shaft spans every ring behind its tip anyway.
 
 ## Slider reference (Material Editor)
